@@ -105,16 +105,27 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     }
 }
 
-// Función para generar tablas de distribución
+// Función mejorada para generar tablas de distribución con planificación por días
 function generarTablasDistribucion($db, $distribucion_id, $fecha_inicio, $fecha_fin, $dias_exclusion_json, $tipo_distribucion, $productos_seleccionados_json) {
     try {
         $dias_exclusion = json_decode($dias_exclusion_json, true) ?: [];
         
         // Obtener productos disponibles según el tipo de distribución
         if ($tipo_distribucion == 'completo') {
-            $stmt_productos = $db->prepare("SELECT id, descripcion, existencia, precio_venta FROM productos WHERE existencia > 0");
+            $stmt_productos = $db->prepare("SELECT id, descripcion, existencia, precio_venta FROM productos WHERE existencia > 0 ORDER BY id");
             $stmt_productos->execute();
-            $productos_disponibles = $stmt_productos->fetchAll();
+            $productos_base = $stmt_productos->fetchAll();
+            
+            // Crear array con cantidades disponibles para distribución completa
+            $productos_disponibles = [];
+            foreach ($productos_base as $producto) {
+                $productos_disponibles[] = [
+                    'id' => $producto['id'],
+                    'descripcion' => $producto['descripcion'],
+                    'precio_venta' => $producto['precio_venta'],
+                    'cantidad_total' => $producto['existencia']
+                ];
+            }
         } else {
             $productos_seleccionados = json_decode($productos_seleccionados_json, true) ?: [];
             $productos_disponibles = [];
@@ -125,8 +136,12 @@ function generarTablasDistribucion($db, $distribucion_id, $fecha_inicio, $fecha_
                 $producto = $stmt_producto->fetch();
                 
                 if ($producto) {
-                    $producto['cantidad_asignada'] = min($producto_sel['cantidad'], $producto['existencia']);
-                    $productos_disponibles[] = $producto;
+                    $productos_disponibles[] = [
+                        'id' => $producto['id'],
+                        'descripcion' => $producto['descripcion'],
+                        'precio_venta' => $producto['precio_venta'],
+                        'cantidad_total' => min($producto_sel['cantidad'], $producto['existencia'])
+                    ];
                 }
             }
         }
@@ -140,10 +155,25 @@ function generarTablasDistribucion($db, $distribucion_id, $fecha_inicio, $fecha_
         $fecha_actual = new DateTime($fecha_inicio);
         $fecha_limite = new DateTime($fecha_fin);
         
+        // Nombres de días en español
+        $dias_semana = [
+            0 => 'Domingo',
+            1 => 'Lunes', 
+            2 => 'Martes',
+            3 => 'Miércoles',
+            4 => 'Jueves',
+            5 => 'Viernes',
+            6 => 'Sábado'
+        ];
+        
         while ($fecha_actual <= $fecha_limite) {
-            $dia_semana = $fecha_actual->format('w'); // 0=domingo, 1=lunes, etc.
-            if (!in_array($dia_semana, $dias_exclusion)) {
-                $fechas_validas[] = $fecha_actual->format('Y-m-d');
+            $dia_semana_num = $fecha_actual->format('w');
+            if (!in_array($dia_semana_num, $dias_exclusion)) {
+                $fechas_validas[] = [
+                    'fecha' => $fecha_actual->format('Y-m-d'),
+                    'dia_nombre' => $dias_semana[$dia_semana_num],
+                    'fecha_formato' => $fecha_actual->format('d/m/Y')
+                ];
             }
             $fecha_actual->add(new DateInterval('P1D'));
         }
@@ -152,38 +182,129 @@ function generarTablasDistribucion($db, $distribucion_id, $fecha_inicio, $fecha_
             return ['success' => false, 'message' => 'No hay fechas válidas para la distribución.'];
         }
         
-        // Distribuir productos en las fechas
-        $total_tablas_generadas = 0;
-        $productos_restantes = $productos_disponibles;
+        $total_dias = count($fechas_validas);
         
-        foreach ($fechas_validas as $fecha) {
-            // Cantidad aleatoria de tablas por día (1-5)
-            $tablas_por_dia = rand(1, min(5, count($productos_restantes)));
+        // **PLANIFICACIÓN DE DISTRIBUCIÓN POR DÍAS**
+        // Calcular cuánto distribuir por día para cada producto
+        $plan_distribucion = [];
+        foreach ($productos_disponibles as $producto) {
+            $cantidad_total = $producto['cantidad_total'];
+            
+            // Distribuir la cantidad total entre todos los días de manera proporcional pero aleatoria
+            $cantidades_por_dia = [];
+            $cantidad_restante = $cantidad_total;
+            
+            // Para los primeros días, asignar cantidades aleatorias pero conservadoras
+            for ($i = 0; $i < $total_dias - 1; $i++) {
+                if ($cantidad_restante <= 0) {
+                    $cantidades_por_dia[] = 0;
+                    continue;
+                }
+                
+                // Calcular el máximo que podemos asignar a este día
+                // Reservamos al menos 1 unidad para cada día restante (si es posible)
+                $dias_restantes = $total_dias - $i;
+                $cantidad_maxima_este_dia = max(1, floor($cantidad_restante * 0.4)); // Máximo 40% de lo restante
+                $cantidad_minima_reserva = max(0, $dias_restantes - 1);
+                
+                if ($cantidad_restante > $cantidad_minima_reserva) {
+                    $cantidad_disponible_este_dia = $cantidad_restante - $cantidad_minima_reserva;
+                    $cantidad_este_dia = rand(1, min($cantidad_maxima_este_dia, $cantidad_disponible_este_dia));
+                } else {
+                    $cantidad_este_dia = min(1, $cantidad_restante);
+                }
+                
+                $cantidades_por_dia[] = $cantidad_este_dia;
+                $cantidad_restante -= $cantidad_este_dia;
+            }
+            
+            // El último día se lleva todo lo que queda
+            $cantidades_por_dia[] = $cantidad_restante;
+            
+            $plan_distribucion[$producto['id']] = [
+                'producto' => $producto,
+                'cantidades_por_dia' => $cantidades_por_dia
+            ];
+        }
+        
+        // **GENERACIÓN DE TABLAS SIGUIENDO EL PLAN**
+        $total_tablas_generadas = 0;
+        $total_dias_procesados = 0;
+        
+        foreach ($fechas_validas as $indice_dia => $fecha_info) {
+            $fecha = $fecha_info['fecha'];
+            $dia_nombre = $fecha_info['dia_nombre'];
+            $fecha_formato = $fecha_info['fecha_formato'];
+            
+            // Obtener productos disponibles para este día según el plan
+            $productos_dia = [];
+            foreach ($plan_distribucion as $producto_id => $plan) {
+                $cantidad_dia = $plan['cantidades_por_dia'][$indice_dia];
+                if ($cantidad_dia > 0) {
+                    $productos_dia[] = [
+                        'id' => $plan['producto']['id'],
+                        'descripcion' => $plan['producto']['descripcion'],
+                        'precio_venta' => $plan['producto']['precio_venta'],
+                        'cantidad_disponible_dia' => $cantidad_dia
+                    ];
+                }
+            }
+            
+            if (empty($productos_dia)) {
+                // Si no hay productos para este día, generar al menos una tabla vacía o saltar
+                continue;
+            }
+            
+            // Generar entre 10 y 30 tablas por día
+            $tablas_por_dia = rand(10, 30);
+            $total_dia = 0;
+            
+            // Crear una copia de productos para este día
+            $productos_restantes_dia = $productos_dia;
             
             for ($tabla_num = 1; $tabla_num <= $tablas_por_dia; $tabla_num++) {
-                if (empty($productos_restantes)) break;
+                // Verificar si aún hay productos disponibles para este día
+                $productos_disponibles_tabla = [];
+                foreach ($productos_restantes_dia as $key => $producto) {
+                    if ($producto['cantidad_disponible_dia'] > 0) {
+                        $productos_disponibles_tabla[$key] = $producto;
+                    }
+                }
+                
+                if (empty($productos_disponibles_tabla)) {
+                    // Si no hay más productos para este día, parar de generar tablas
+                    break;
+                }
                 
                 // Insertar tabla
                 $stmt_tabla = $db->prepare("INSERT INTO tablas_distribucion (distribucion_id, fecha_tabla, numero_tabla) VALUES (?, ?, ?)");
                 $stmt_tabla->execute([$distribucion_id, $fecha, $tabla_num]);
                 $tabla_id = $db->lastInsertId();
                 
-                // Cantidad aleatoria de productos por tabla (1-8)
-                $productos_por_tabla = rand(1, min(8, count($productos_restantes)));
-                $productos_tabla = array_splice($productos_restantes, 0, $productos_por_tabla);
+                // Determinar cantidad de productos por tabla (1-40, pero no más de los disponibles)
+                $max_productos_tabla = min(40, count($productos_disponibles_tabla));
+                $productos_por_tabla = rand(1, $max_productos_tabla);
+                
+                // Seleccionar productos aleatorios para esta tabla (sin repetir)
+                $indices_seleccionados = array_rand($productos_disponibles_tabla, min($productos_por_tabla, count($productos_disponibles_tabla)));
+                if (!is_array($indices_seleccionados)) {
+                    $indices_seleccionados = [$indices_seleccionados];
+                }
                 
                 $total_tabla = 0;
                 
-                foreach ($productos_tabla as $producto) {
-                    if ($tipo_distribucion == 'completo') {
-                        $cantidad_disponible = $producto['existencia'];
-                    } else {
-                        $cantidad_disponible = $producto['cantidad_asignada'];
-                    }
+                foreach ($indices_seleccionados as $indice) {
+                    $producto = $productos_restantes_dia[$indice];
                     
-                    if ($cantidad_disponible > 0) {
-                        // Cantidad aleatoria del producto (1 hasta el máximo disponible)
-                        $cantidad_usar = rand(1, $cantidad_disponible);
+                    if ($producto['cantidad_disponible_dia'] > 0) {
+                        // Cantidad aleatoria del producto (de 1 hasta lo disponible para este día)
+                        // Distribuir de manera más conservadora para que dure todo el día
+                        $cantidad_maxima = min(
+                            $producto['cantidad_disponible_dia'], 
+                            max(1, floor($producto['cantidad_disponible_dia'] / max(1, $tablas_por_dia - $tabla_num + 1)) * 2)
+                        );
+                        $cantidad_usar = rand(1, max(1, $cantidad_maxima));
+                        
                         $subtotal = $cantidad_usar * $producto['precio_venta'];
                         $total_tabla += $subtotal;
                         
@@ -191,22 +312,12 @@ function generarTablasDistribucion($db, $distribucion_id, $fecha_inicio, $fecha_
                         $stmt_detalle = $db->prepare("INSERT INTO detalle_tablas_distribucion (tabla_id, producto_id, cantidad, precio_venta, subtotal) VALUES (?, ?, ?, ?, ?)");
                         $stmt_detalle->execute([$tabla_id, $producto['id'], $cantidad_usar, $producto['precio_venta'], $subtotal]);
                         
-                        // Actualizar existencia
+                        // Actualizar existencia en la base de datos
                         $stmt_update = $db->prepare("UPDATE productos SET existencia = existencia - ? WHERE id = ?");
                         $stmt_update->execute([$cantidad_usar, $producto['id']]);
                         
-                        // Actualizar cantidad disponible para próximas tablas
-                        if ($tipo_distribucion == 'completo') {
-                            $producto['existencia'] -= $cantidad_usar;
-                        } else {
-                            $producto['cantidad_asignada'] -= $cantidad_usar;
-                        }
-                        
-                        // Si aún hay cantidad disponible, volver a agregar a productos restantes
-                        if (($tipo_distribucion == 'completo' && $producto['existencia'] > 0) ||
-                            ($tipo_distribucion == 'parcial' && $producto['cantidad_asignada'] > 0)) {
-                            $productos_restantes[] = $producto;
-                        }
+                        // Actualizar cantidad disponible para este día
+                        $productos_restantes_dia[$indice]['cantidad_disponible_dia'] -= $cantidad_usar;
                     }
                 }
                 
@@ -214,23 +325,22 @@ function generarTablasDistribucion($db, $distribucion_id, $fecha_inicio, $fecha_
                 $stmt_total = $db->prepare("UPDATE tablas_distribucion SET total_tabla = ? WHERE id = ?");
                 $stmt_total->execute([$total_tabla, $tabla_id]);
                 
+                $total_dia += $total_tabla;
                 $total_tablas_generadas++;
             }
             
-            // Mezclar productos restantes para mayor aleatoriedad
-            shuffle($productos_restantes);
+            $total_dias_procesados++;
         }
         
         return [
             'success' => true, 
-            'message' => "Se generaron {$total_tablas_generadas} tablas distribuidas en " . count($fechas_validas) . " días."
+            'message' => "Se generaron {$total_tablas_generadas} tablas distribuidas equitativamente en {$total_dias_procesados} días. Todos los días del período tienen distribución garantizada."
         ];
         
     } catch (Exception $e) {
         return ['success' => false, 'message' => $e->getMessage()];
     }
 }
-
 // Obtener distribuciones con paginación
 $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
 $limit = 10;
@@ -319,6 +429,20 @@ $productos_con_existencia = $stmt_productos->fetchAll();
             margin-bottom: 15px;
             padding: 10px;
             background-color: #fff;
+        }
+        .dia-resumen {
+            background-color: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            margin-bottom: 20px;
+            padding: 15px;
+            border-radius: 5px;
+        }
+        .fecha-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 10px 15px;
+            border-radius: 8px 8px 0 0;
+            margin-bottom: 0;
         }
     </style>
 </head>
@@ -494,7 +618,6 @@ $productos_con_existencia = $stmt_productos->fetchAll();
             </main>
         </div>
     </div>
-
     <!-- Modal para nueva distribución -->
     <div class="modal fade" id="modalDistribucion" tabindex="-1" aria-labelledby="modalDistribucionLabel" aria-hidden="true">
         <div class="modal-dialog modal-xl">
@@ -614,6 +737,17 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                                 ?>
                             </div>
                         </div>
+
+                        <div class="alert alert-info mt-3">
+                            <h6><i class="bi bi-info-circle"></i> Configuración de Distribución:</h6>
+                            <ul class="mb-0">
+                                <li><strong>Tablas por día:</strong> Entre 10 y 30 tablas (aleatorio)</li>
+                                <li><strong>Productos por tabla:</strong> Entre 1 y 40 productos (aleatorio)</li>
+                                <li><strong>Cantidades:</strong> Aleatorias según disponibilidad</li>
+                                <li><strong>Sin repetir:</strong> Un producto no aparece dos veces en la misma tabla</li>
+                                <li><strong>Cobertura:</strong> Se generarán tablas en TODOS los días seleccionados</li>
+                            </ul>
+                        </div>
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
@@ -670,7 +804,6 @@ $productos_con_existencia = $stmt_productos->fetchAll();
             </div>
         </div>
     </div>
-
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         // Manejar cambio de tipo de distribución
@@ -726,10 +859,11 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                 }
             }
             
-            // Confirmar la acción
+            // Confirmar la acción con información detallada
+            const diasSeleccionados = calcularDiasSeleccionados();
             const confirmMsg = tipoDistribucion === 'completo' 
-                ? '¿Confirmar la distribución de TODO el inventario disponible?' 
-                : '¿Confirmar la distribución de los productos seleccionados?';
+                ? `¿Confirmar la distribución de TODO el inventario disponible?\n\nSe generarán entre 10-30 tablas por día en ${diasSeleccionados} días válidos.\nCada tabla tendrá entre 1-40 productos con cantidades aleatorias.` 
+                : `¿Confirmar la distribución de los productos seleccionados?\n\nSe generarán entre 10-30 tablas por día en ${diasSeleccionados} días válidos.\nCada tabla tendrá entre 1-40 productos con cantidades aleatorias.`;
                 
             if (!confirm(confirmMsg)) {
                 e.preventDefault();
@@ -737,7 +871,32 @@ $productos_con_existencia = $stmt_productos->fetchAll();
             }
         });
 
-        // Ver tablas de distribución
+        // Función para calcular días seleccionados
+        function calcularDiasSeleccionados() {
+            const fechaInicio = new Date(document.getElementById('fecha_inicio').value);
+            const fechaFin = new Date(document.getElementById('fecha_fin').value);
+            const diasExcluidos = [];
+            
+            // Obtener días excluidos
+            document.querySelectorAll('input[name="dias_exclusion[]"]:checked').forEach(checkbox => {
+                diasExcluidos.push(parseInt(checkbox.value));
+            });
+            
+            let count = 0;
+            let fechaActual = new Date(fechaInicio);
+            
+            while (fechaActual <= fechaFin) {
+                const diaSemana = fechaActual.getDay();
+                if (!diasExcluidos.includes(diaSemana)) {
+                    count++;
+                }
+                fechaActual.setDate(fechaActual.getDate() + 1);
+            }
+            
+            return count;
+        }
+
+        // Ver tablas de distribución con formato mejorado
         function verTablas(distribucionId) {
             fetch(`get_tablas_distribucion.php?id=${distribucionId}`)
                 .then(response => response.json())
@@ -749,7 +908,7 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                                     <h6>Distribución del ${data.distribucion.fecha_inicio} al ${data.distribucion.fecha_fin}</h6>
                                     <p><strong>Tipo:</strong> ${data.distribucion.tipo_distribucion} | 
                                        <strong>Total Tablas:</strong> ${data.tablas.length} | 
-                                       <strong>Total Distribuido:</strong> ${parseFloat(data.total_general).toFixed(2)}</p>
+                                       <strong>Total Distribuido:</strong> $${parseFloat(data.total_general).toFixed(2)}</p>
                                 </div>
                             </div>
                         `;
@@ -763,11 +922,29 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                             tablasPorFecha[tabla.fecha_tabla].push(tabla);
                         });
                         
-                        // Mostrar tablas agrupadas por fecha
+                        // Mostrar tablas agrupadas por fecha con día de la semana
                         Object.keys(tablasPorFecha).sort().forEach(fecha => {
-                            html += `<div class="mb-4">
-                                        <h6 class="text-primary border-bottom pb-2">📅 ${fecha} (${tablasPorFecha[fecha].length} tablas)</h6>
-                                        <div class="row">`;
+                            const fechaObj = new Date(fecha + 'T00:00:00');
+                            const diasSemana = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+                            const diaNombre = diasSemana[fechaObj.getDay()];
+                            const fechaFormateada = fechaObj.toLocaleDateString('es-ES');
+                            
+                            // Calcular total del día
+                            const totalDia = tablasPorFecha[fecha].reduce((sum, tabla) => sum + parseFloat(tabla.total_tabla), 0);
+                            
+                            html += `
+                                <div class="dia-resumen mb-4">
+                                    <div class="fecha-header">
+                                        <div class="d-flex justify-content-between align-items-center">
+                                            <h6 class="mb-0">📅 ${diaNombre} ${fechaFormateada}</h6>
+                                            <div>
+                                                <span class="badge bg-light text-dark me-2">${tablasPorFecha[fecha].length} tablas</span>
+                                                <span class="badge bg-warning text-dark">Total: $${totalDia.toFixed(2)}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="row mt-3">
+                            `;
                             
                             tablasPorFecha[fecha].forEach(tabla => {
                                 html += `
@@ -775,7 +952,7 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                                         <div class="tabla-distribucion">
                                             <div class="d-flex justify-content-between align-items-center mb-2">
                                                 <h6 class="mb-0">Tabla #${tabla.numero_tabla}</h6>
-                                                <strong class="text-success">${parseFloat(tabla.total_tabla).toFixed(2)}</strong>
+                                                <strong class="text-success">$${parseFloat(tabla.total_tabla).toFixed(2)}</strong>
                                             </div>
                                             <div class="table-responsive">
                                                 <table class="table table-sm table-striped">
@@ -795,8 +972,8 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                                         <tr>
                                             <td>${detalle.descripcion}</td>
                                             <td>${detalle.cantidad}</td>
-                                            <td>${parseFloat(detalle.precio_venta).toFixed(2)}</td>
-                                            <td>${parseFloat(detalle.subtotal).toFixed(2)}</td>
+                                            <td>$${parseFloat(detalle.precio_venta).toFixed(2)}</td>
+                                            <td>$${parseFloat(detalle.subtotal).toFixed(2)}</td>
                                         </tr>
                                     `;
                                 });
@@ -845,6 +1022,8 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                     <style>
                         body { font-size: 12px; }
                         .tabla-distribucion { border: 1px solid #ccc; border-radius: 8px; margin-bottom: 15px; padding: 10px; page-break-inside: avoid; }
+                        .dia-resumen { background-color: #e3f2fd; border-left: 4px solid #2196f3; margin-bottom: 20px; padding: 15px; border-radius: 5px; }
+                        .fecha-header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 10px 15px; border-radius: 8px 8px 0 0; margin-bottom: 0; }
                         @media print { .btn { display: none; } }
                     </style>
                 </head>

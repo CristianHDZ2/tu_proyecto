@@ -27,21 +27,34 @@ try {
         exit;
     }
     
-    // Obtener tablas de la distribución
+    // Obtener tablas de la distribución ordenadas por fecha y número de tabla
     $stmt_tablas = $db->prepare("SELECT 
         td.*,
-        DATE_FORMAT(td.fecha_tabla, '%d/%m/%Y') as fecha_tabla
+        DATE_FORMAT(td.fecha_tabla, '%Y-%m-%d') as fecha_tabla,
+        DATE_FORMAT(td.fecha_tabla, '%d/%m/%Y') as fecha_tabla_formato,
+        DAYNAME(td.fecha_tabla) as dia_semana_ingles
     FROM tablas_distribucion td 
     WHERE td.distribucion_id = ? AND td.estado = 'activo'
     ORDER BY td.fecha_tabla, td.numero_tabla");
     $stmt_tablas->execute([$distribucion_id]);
-    $tablas = $stmt_tablas->fetchAll();
+    $tablas_raw = $stmt_tablas->fetchAll();
     
-    // Obtener detalles de cada tabla
+    // Traducir días de la semana
+    $dias_traduccion = [
+        'Sunday' => 'Domingo',
+        'Monday' => 'Lunes',
+        'Tuesday' => 'Martes',
+        'Wednesday' => 'Miércoles',
+        'Thursday' => 'Jueves',
+        'Friday' => 'Viernes',
+        'Saturday' => 'Sábado'
+    ];
+    
+    // Obtener detalles de cada tabla y agregar información del día
     $tablas_con_detalles = [];
     $total_general = 0;
     
-    foreach ($tablas as $tabla) {
+    foreach ($tablas_raw as $tabla) {
         $stmt_detalles = $db->prepare("SELECT 
             dtd.*,
             p.descripcion,
@@ -52,6 +65,11 @@ try {
         ORDER BY p.descripcion");
         $stmt_detalles->execute([$tabla['id']]);
         $detalles = $stmt_detalles->fetchAll();
+        
+        // Agregar día de la semana en español
+        $tabla['dia_semana'] = isset($dias_traduccion[$tabla['dia_semana_ingles']]) 
+                              ? $dias_traduccion[$tabla['dia_semana_ingles']] 
+                              : $tabla['dia_semana_ingles'];
         
         $tabla['detalles'] = $detalles;
         $tablas_con_detalles[] = $tabla;
