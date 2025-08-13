@@ -189,7 +189,6 @@ $total_ingresos_productos = $reporte_ingresos['resumen']['total_productos_ingres
 $total_salidas_productos = $reporte_salidas['resumen']['total_productos_distribuidos'] ?: 0;
 $diferencia_productos = $total_salidas_productos - $total_ingresos_productos;
 ?>
-
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -459,7 +458,6 @@ $diferencia_productos = $total_salidas_productos - $total_ingresos_productos;
                                     </div>
                                 </div>
                             </div>
-
                             <!-- Ingresos por proveedor -->
                             <div class="col-md-6 mb-4">
                                 <div class="card">
@@ -761,7 +759,6 @@ $diferencia_productos = $total_salidas_productos - $total_ingresos_productos;
                             </div>
                         </div>
                     </div>
-
                     <!-- Análisis Comparativo -->
                     <div class="tab-pane fade" id="comparativo" role="tabpanel">
                         <div class="row mt-4">
@@ -948,11 +945,11 @@ $diferencia_productos = $total_salidas_productos - $total_ingresos_productos;
                                             <div class="col-md-3">
                                                 <div class="text-center">
                                                     <h5 class="text-primary">
-                                                        <?php 
+                                                        $<?php 
                                                         $promedio_ingreso = $reporte_ingresos['resumen']['total_ingresos'] > 0 
                                                             ? $total_ingresos_monto / $reporte_ingresos['resumen']['total_ingresos'] 
                                                             : 0;
-                                                        echo ' . number_format($promedio_ingreso, 2);
+                                                        echo number_format($promedio_ingreso, 2);
                                                         ?>
                                                     </h5>
                                                     <small>Promedio por Ingreso</small>
@@ -961,11 +958,11 @@ $diferencia_productos = $total_salidas_productos - $total_ingresos_productos;
                                             <div class="col-md-3">
                                                 <div class="text-center">
                                                     <h5 class="text-info">
-                                                        <?php 
+                                                        $<?php 
                                                         $promedio_tabla = $reporte_salidas['resumen']['total_tablas'] > 0 
                                                             ? $total_salidas_monto / $reporte_salidas['resumen']['total_tablas'] 
                                                             : 0;
-                                                        echo ' . number_format($promedio_tabla, 2);
+                                                        echo number_format($promedio_tabla, 2);
                                                         ?>
                                                     </h5>
                                                     <small>Promedio por Tabla</small>
