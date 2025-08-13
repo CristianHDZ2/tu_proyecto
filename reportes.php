@@ -56,8 +56,8 @@ function obtenerReporteIngresos($db, $fecha_desde, $fecha_hasta, $proveedor_filt
     
     // Ingresos por fecha
     $stmt_por_fecha = $db->prepare("SELECT 
-        DATE_FORMAT(i.fecha_ingreso, '%Y-%m-%d') as fecha,
-        DATE_FORMAT(i.fecha_ingreso, '%d/%m/%Y') as fecha_formato,
+        DATE(i.fecha_ingreso) as fecha,
+        DATE_FORMAT(DATE(i.fecha_ingreso), '%d/%m/%Y') as fecha_formato,
         COUNT(DISTINCT i.id) as total_ingresos,
         SUM(i.total_factura) as total_monto,
         SUM(di.cantidad) as total_productos
@@ -65,7 +65,7 @@ function obtenerReporteIngresos($db, $fecha_desde, $fecha_hasta, $proveedor_filt
     LEFT JOIN detalle_ingresos di ON i.id = di.ingreso_id
     $where_clause
     GROUP BY DATE(i.fecha_ingreso)
-    ORDER BY i.fecha_ingreso DESC");
+    ORDER BY DATE(i.fecha_ingreso) DESC");
     $stmt_por_fecha->execute($params);
     $ingresos_por_fecha = $stmt_por_fecha->fetchAll();
     
@@ -137,8 +137,8 @@ function obtenerReporteSalidas($db, $fecha_desde, $fecha_hasta, $proveedor_filte
     
     // Salidas por fecha
     $stmt_por_fecha = $db->prepare("SELECT 
-        DATE_FORMAT(td.fecha_tabla, '%Y-%m-%d') as fecha,
-        DATE_FORMAT(td.fecha_tabla, '%d/%m/%Y') as fecha_formato,
+        DATE(td.fecha_tabla) as fecha,
+        DATE_FORMAT(DATE(td.fecha_tabla), '%d/%m/%Y') as fecha_formato,
         COUNT(DISTINCT td.id) as total_tablas,
         SUM(td.total_tabla) as total_monto,
         SUM(dtd.cantidad) as total_productos
@@ -147,7 +147,7 @@ function obtenerReporteSalidas($db, $fecha_desde, $fecha_hasta, $proveedor_filte
     LEFT JOIN productos p ON dtd.producto_id = p.id
     $where_clause
     GROUP BY DATE(td.fecha_tabla)
-    ORDER BY td.fecha_tabla DESC");
+    ORDER BY DATE(td.fecha_tabla) DESC");
     $stmt_por_fecha->execute($params);
     $salidas_por_fecha = $stmt_por_fecha->fetchAll();
     
