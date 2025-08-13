@@ -57,7 +57,6 @@ function obtenerReporteIngresos($db, $fecha_desde, $fecha_hasta, $proveedor_filt
     // Ingresos por fecha
     $stmt_por_fecha = $db->prepare("SELECT 
         DATE(i.fecha_ingreso) as fecha,
-        DATE_FORMAT(DATE(i.fecha_ingreso), '%d/%m/%Y') as fecha_formato,
         COUNT(DISTINCT i.id) as total_ingresos,
         SUM(i.total_factura) as total_monto,
         SUM(di.cantidad) as total_productos
@@ -138,7 +137,6 @@ function obtenerReporteSalidas($db, $fecha_desde, $fecha_hasta, $proveedor_filte
     // Salidas por fecha
     $stmt_por_fecha = $db->prepare("SELECT 
         DATE(td.fecha_tabla) as fecha,
-        DATE_FORMAT(DATE(td.fecha_tabla), '%d/%m/%Y') as fecha_formato,
         COUNT(DISTINCT td.id) as total_tablas,
         SUM(td.total_tabla) as total_monto,
         SUM(dtd.cantidad) as total_productos
@@ -565,7 +563,7 @@ $diferencia_productos = $total_salidas_productos - $total_ingresos_productos;
                                                     <tbody>
                                                         <?php foreach ($reporte_ingresos['por_fecha'] as $fecha): ?>
                                                             <tr>
-                                                                <td><?php echo $fecha['fecha_formato']; ?></td>
+                                                                <td><?php echo date('d/m/Y', strtotime($fecha['fecha'])); ?></td>
                                                                 <td><?php echo $fecha['total_ingresos']; ?></td>
                                                                 <td class="fw-bold">$<?php echo number_format($fecha['total_monto'], 2); ?></td>
                                                                 <td><?php echo number_format($fecha['total_productos']); ?></td>
@@ -732,7 +730,7 @@ $diferencia_productos = $total_salidas_productos - $total_ingresos_productos;
                                                     <tbody>
                                                         <?php foreach ($reporte_salidas['por_fecha'] as $fecha): ?>
                                                             <tr>
-                                                                <td><?php echo $fecha['fecha_formato']; ?></td>
+                                                                <td><?php echo date('d/m/Y', strtotime($fecha['fecha'])); ?></td>
                                                                 <td><?php echo $fecha['total_tablas']; ?></td>
                                                                 <td class="fw-bold">$<?php echo number_format($fecha['total_monto'], 2); ?></td>
                                                                 <td><?php echo number_format($fecha['total_productos']); ?></td>
