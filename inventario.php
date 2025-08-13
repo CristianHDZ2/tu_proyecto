@@ -4,6 +4,82 @@ require_once 'config/database.php';
 $database = new Database();
 $db = $database->getConnection();
 
+$mensaje = '';
+$tipo_mensaje = '';
+
+// Procesar acciones
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    if (isset($_POST['accion'])) {
+        switch ($_POST['accion']) {
+            case 'editar_existencia':
+                try {
+                    $producto_id = $_POST['producto_id'];
+                    $nueva_existencia = $_POST['nueva_existencia'];
+                    $motivo = $_POST['motivo'];
+                    
+                    // Validar que la nueva existencia sea un número válido
+                    if (!is_numeric($nueva_existencia) || $nueva_existencia < 0) {
+                        throw new Exception('La existencia debe ser un número válido mayor o igual a 0.');
+                    }
+                    
+                    // Obtener la existencia actual
+                    $stmt_actual = $db->prepare("SELECT existencia, descripcion FROM productos WHERE id = ?");
+                    $stmt_actual->execute([$producto_id]);
+                    $producto_actual = $stmt_actual->fetch();
+                    
+                    if (!$producto_actual) {
+                        throw new Exception('Producto no encontrado.');
+                    }
+                    
+                    $existencia_anterior = $producto_actual['existencia'];
+                    $diferencia = $nueva_existencia - $existencia_anterior;
+                    
+                    // Actualizar la existencia
+                    $stmt_update = $db->prepare("UPDATE productos SET existencia = ?, fecha_actualizacion = CURRENT_TIMESTAMP WHERE id = ?");
+                    $stmt_update->execute([$nueva_existencia, $producto_id]);
+                    
+                    // Registrar el ajuste en la tabla de ingresos como un ajuste manual (opcional)
+                    if ($diferencia != 0) {
+                        $tipo_ajuste = $diferencia > 0 ? 'Ajuste de Inventario (+)' : 'Ajuste de Inventario (-)';
+                        $numero_factura = 'AJUSTE-' . date('YmdHis');
+                        
+                        $stmt_ingreso = $db->prepare("INSERT INTO ingresos (proveedor, numero_factura, fecha_ingreso, total_factura) VALUES (?, ?, ?, ?)");
+                        $stmt_ingreso->execute([
+                            'AJUSTE MANUAL',
+                            $numero_factura,
+                            date('Y-m-d'),
+                            0
+                        ]);
+                        
+                        $ingreso_id = $db->lastInsertId();
+                        
+                        // Solo registrar si es un incremento (no registramos decrementos como ingresos negativos)
+                        if ($diferencia > 0) {
+                            $stmt_detalle = $db->prepare("INSERT INTO detalle_ingresos (ingreso_id, producto_id, cantidad, precio_compra, subtotal) VALUES (?, ?, ?, ?, ?)");
+                            $stmt_detalle->execute([
+                                $ingreso_id,
+                                $producto_id,
+                                $diferencia,
+                                0,
+                                0
+                            ]);
+                        }
+                    }
+                    
+                    $mensaje = "Existencia actualizada exitosamente. " . 
+                               "Anterior: {$existencia_anterior}, Nueva: {$nueva_existencia}" . 
+                               ($motivo ? " (Motivo: {$motivo})" : "");
+                    $tipo_mensaje = "success";
+                    
+                } catch (Exception $e) {
+                    $mensaje = "Error al actualizar la existencia: " . $e->getMessage();
+                    $tipo_mensaje = "danger";
+                }
+                break;
+        }
+    }
+}
+
 // Obtener inventario con paginación
 $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
 $limit = 15;
@@ -127,6 +203,20 @@ $proveedores = $stmt_proveedores->fetchAll();
         .table-sm td {
             padding: 0.5rem 0.75rem;
         }
+        .existencia-editable {
+            cursor: pointer;
+            border: 1px dashed transparent;
+            padding: 2px 5px;
+            border-radius: 3px;
+        }
+        .existencia-editable:hover {
+            border-color: #007bff;
+            background-color: #f8f9fa;
+        }
+        .existencia-input {
+            width: 80px;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
@@ -181,6 +271,14 @@ $proveedores = $stmt_proveedores->fetchAll();
                         <i class="bi bi-plus-lg"></i> Registrar Ingreso
                     </a>
                 </div>
+
+                <!-- Mensajes -->
+                <?php if (!empty($mensaje)): ?>
+                    <div class="alert alert-<?php echo $tipo_mensaje; ?> alert-dismissible fade show" role="alert">
+                        <?php echo htmlspecialchars($mensaje); ?>
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                <?php endif; ?>
 
                 <!-- Estadísticas del inventario -->
                 <div class="row mb-4">
@@ -311,11 +409,13 @@ $proveedores = $stmt_proveedores->fetchAll();
                         </form>
                     </div>
                 </div>
-
                 <!-- Tabla de inventario -->
                 <div class="card">
-                    <div class="card-header">
+                    <div class="card-header d-flex justify-content-between align-items-center">
                         <h5 class="card-title mb-0">Inventario Actual (<?php echo $total_productos; ?> productos)</h5>
+                        <small class="text-muted">
+                            <i class="bi bi-info-circle"></i> Haga clic en la existencia para editarla
+                        </small>
                     </div>
                     <div class="card-body">
                         <?php if (count($productos) > 0): ?>
@@ -340,11 +440,16 @@ $proveedores = $stmt_proveedores->fetchAll();
                                                 <td><?php echo htmlspecialchars($producto['descripcion']); ?></td>
                                                 <td>$<?php echo number_format($producto['precio_venta'], 2); ?></td>
                                                 <td>
-                                                    <span class="badge <?php 
+                                                    <span class="existencia-editable badge <?php 
                                                         echo $producto['existencia'] == 0 ? 'bg-danger' : 
                                                              ($producto['existencia'] < 10 ? 'bg-warning text-dark' : 'bg-success'); 
-                                                    ?>">
+                                                    ?>" 
+                                                    data-producto-id="<?php echo $producto['id']; ?>"
+                                                    data-existencia-actual="<?php echo $producto['existencia']; ?>"
+                                                    data-descripcion="<?php echo htmlspecialchars($producto['descripcion']); ?>"
+                                                    title="Clic para editar">
                                                         <?php echo number_format($producto['existencia']); ?>
+                                                        <i class="bi bi-pencil-square ms-1"></i>
                                                     </span>
                                                 </td>
                                                 <td class="text-success">
@@ -447,6 +552,277 @@ $proveedores = $stmt_proveedores->fetchAll();
         </div>
     </div>
 
+    <!-- Modal para editar existencia -->
+    <div class="modal fade" id="modalEditarExistencia" tabindex="-1" aria-labelledby="modalEditarExistenciaLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="modalEditarExistenciaLabel">Editar Existencia</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <form id="formEditarExistencia" method="POST">
+                    <div class="modal-body">
+                        <input type="hidden" name="accion" value="editar_existencia">
+                        <input type="hidden" name="producto_id" id="producto_id_editar">
+                        
+                        <div class="mb-3">
+                            <label class="form-label"><strong>Producto:</strong></label>
+                            <p id="descripcion_producto" class="text-muted"></p>
+                        </div>
+                        
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <label class="form-label">Existencia Actual:</label>
+                                <div class="form-control-plaintext fw-bold" id="existencia_actual"></div>
+                            </div>
+                            <div class="col-md-6">
+                                <label for="nueva_existencia" class="form-label">Nueva Existencia <span class="text-danger">*</span></label>
+                                <input type="number" class="form-control" id="nueva_existencia" name="nueva_existencia" 
+                                       required min="0" step="1" placeholder="0">
+                            </div>
+                        </div>
+                        
+                        <div id="diferencia_info" class="mb-3" style="display: none;">
+                            <div class="alert alert-info">
+                                <strong>Diferencia:</strong> <span id="diferencia_texto"></span>
+                            </div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="motivo" class="form-label">Motivo del Ajuste (Opcional)</label>
+                            <textarea class="form-control" id="motivo" name="motivo" rows="3" 
+                                      placeholder="Ej: Conteo físico, producto dañado, ajuste por inventario, etc."></textarea>
+                        </div>
+                        
+                        <div class="alert alert-warning">
+                            <i class="bi bi-exclamation-triangle"></i>
+                            <strong>Importante:</strong> Este cambio se registrará como un ajuste de inventario y afectará las estadísticas del sistema.
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                        <button type="submit" class="btn btn-primary" id="btnGuardarExistencia">
+                            <i class="bi bi-save"></i> Actualizar Existencia
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal de confirmación para cambios grandes -->
+    <div class="modal fade" id="modalConfirmarCambio" tabindex="-1" aria-labelledby="modalConfirmarCambioLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="modalConfirmarCambioLabel">Confirmar Cambio Importante</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-warning">
+                        <i class="bi bi-exclamation-triangle"></i>
+                        <strong>¡Atención!</strong> Va a realizar un cambio significativo en la existencia.
+                    </div>
+                    <p id="confirmacion_texto"></p>
+                    <p><strong>¿Está seguro que desea continuar?</strong></p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button type="button" class="btn btn-warning" id="btnConfirmarCambio">
+                        <i class="bi bi-check-circle"></i> Sí, Confirmar Cambio
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Variables globales
+        let currentProductId = null;
+        let currentExistencia = null;
+        let pendingSubmission = false;
+
+        // Manejar clic en existencia editable
+        document.querySelectorAll('.existencia-editable').forEach(element => {
+            element.addEventListener('click', function() {
+                const productoId = this.getAttribute('data-producto-id');
+                const existenciaActual = this.getAttribute('data-existencia-actual');
+                const descripcion = this.getAttribute('data-descripcion');
+                
+                // Llenar el modal
+                document.getElementById('producto_id_editar').value = productoId;
+                document.getElementById('existencia_actual').textContent = existenciaActual + ' unidades';
+                document.getElementById('descripcion_producto').textContent = descripcion;
+                document.getElementById('nueva_existencia').value = existenciaActual;
+                document.getElementById('motivo').value = '';
+                
+                // Limpiar diferencia
+                document.getElementById('diferencia_info').style.display = 'none';
+                
+                // Guardar valores actuales
+                currentProductId = productoId;
+                currentExistencia = parseInt(existenciaActual);
+                
+                // Mostrar modal
+                const modal = new bootstrap.Modal(document.getElementById('modalEditarExistencia'));
+                modal.show();
+                
+                // Enfocar el campo de nueva existencia
+                setTimeout(() => {
+                    document.getElementById('nueva_existencia').focus();
+                    document.getElementById('nueva_existencia').select();
+                }, 500);
+            });
+        });
+
+        // Calcular diferencia al cambiar la nueva existencia
+        document.getElementById('nueva_existencia').addEventListener('input', function() {
+            const nuevaExistencia = parseInt(this.value) || 0;
+            const diferencia = nuevaExistencia - currentExistencia;
+            
+            if (diferencia !== 0) {
+                const diferenciaInfo = document.getElementById('diferencia_info');
+                const diferenciaTexto = document.getElementById('diferencia_texto');
+                
+                if (diferencia > 0) {
+                    diferenciaTexto.innerHTML = `<span class="text-success">+${diferencia} unidades (Incremento)</span>`;
+                } else {
+                    diferenciaTexto.innerHTML = `<span class="text-danger">${diferencia} unidades (Reducción)</span>`;
+                }
+                
+                diferenciaInfo.style.display = 'block';
+            } else {
+                document.getElementById('diferencia_info').style.display = 'none';
+            }
+        });
+
+        // Validación y envío del formulario
+        document.getElementById('formEditarExistencia').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const nuevaExistencia = parseInt(document.getElementById('nueva_existencia').value) || 0;
+            const diferencia = Math.abs(nuevaExistencia - currentExistencia);
+            const porcentajeCambio = currentExistencia > 0 ? (diferencia / currentExistencia) * 100 : 100;
+            
+            // Si el cambio es significativo (más del 50% o diferencia mayor a 100 unidades), pedir confirmación
+            if ((porcentajeCambio > 50 || diferencia > 100) && !pendingSubmission) {
+                const descripcion = document.getElementById('descripcion_producto').textContent;
+                const confirmacionTexto = document.getElementById('confirmacion_texto');
+                
+                confirmacionTexto.innerHTML = `
+                    <strong>Producto:</strong> ${descripcion}<br>
+                    <strong>Existencia actual:</strong> ${currentExistencia} unidades<br>
+                    <strong>Nueva existencia:</strong> ${nuevaExistencia} unidades<br>
+                    <strong>Diferencia:</strong> ${nuevaExistencia - currentExistencia} unidades (${porcentajeCambio.toFixed(1)}% de cambio)
+                `;
+                
+                // Ocultar el modal actual y mostrar confirmación
+                const modalEditarExistencia = bootstrap.Modal.getInstance(document.getElementById('modalEditarExistencia'));
+                modalEditarExistencia.hide();
+                
+                const modalConfirmar = new bootstrap.Modal(document.getElementById('modalConfirmarCambio'));
+                modalConfirmar.show();
+                
+                return false;
+            }
+            
+            // Validaciones básicas
+            if (nuevaExistencia < 0) {
+                alert('La existencia no puede ser negativa.');
+                return false;
+            }
+            
+            if (isNaN(nuevaExistencia)) {
+                alert('Por favor, ingrese un número válido.');
+                return false;
+            }
+            
+            // Si llegamos aquí, proceder con el envío
+            this.submit();
+        });
+
+        // Manejar confirmación de cambio grande
+        document.getElementById('btnConfirmarCambio').addEventListener('click', function() {
+            pendingSubmission = true;
+            
+            // Ocultar modal de confirmación
+            const modalConfirmar = bootstrap.Modal.getInstance(document.getElementById('modalConfirmarCambio'));
+            modalConfirmar.hide();
+            
+            // Enviar el formulario
+            document.getElementById('formEditarExistencia').submit();
+        });
+
+        // Restablecer estado cuando se oculta el modal de confirmación
+        document.getElementById('modalConfirmarCambio').addEventListener('hidden.bs.modal', function() {
+            if (!pendingSubmission) {
+                // Volver a mostrar el modal de edición si no se confirmó
+                const modalEditarExistencia = new bootstrap.Modal(document.getElementById('modalEditarExistencia'));
+                modalEditarExistencia.show();
+            }
+        });
+
+        // Limpiar formulario al cerrar modal
+        document.getElementById('modalEditarExistencia').addEventListener('hidden.bs.modal', function() {
+            if (!pendingSubmission) {
+                document.getElementById('formEditarExistencia').reset();
+                document.getElementById('diferencia_info').style.display = 'none';
+                currentProductId = null;
+                currentExistencia = null;
+            }
+            pendingSubmission = false;
+        });
+
+        // Atajos de teclado en el modal
+        document.getElementById('modalEditarExistencia').addEventListener('keydown', function(e) {
+            // Enter para enviar (solo si no es en textarea)
+            if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') {
+                e.preventDefault();
+                document.getElementById('formEditarExistencia').dispatchEvent(new Event('submit'));
+            }
+            
+            // Escape para cerrar
+            if (e.key === 'Escape') {
+                const modal = bootstrap.Modal.getInstance(this);
+                modal.hide();
+            }
+        });
+
+        // Agregar tooltip a las existencias editables
+        document.querySelectorAll('.existencia-editable').forEach(element => {
+            element.setAttribute('data-bs-toggle', 'tooltip');
+            element.setAttribute('data-bs-placement', 'top');
+            element.setAttribute('title', 'Clic para editar la existencia');
+        });
+
+        // Inicializar tooltips
+        const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+        const tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
+            return new bootstrap.Tooltip(tooltipTriggerEl);
+        });
+
+        // Manejar actualización visual después de editar
+        document.addEventListener('DOMContentLoaded', function() {
+            // Si hay un mensaje de éxito, destacar brevemente las existencias editables
+            const alertSuccess = document.querySelector('.alert-success');
+            if (alertSuccess && alertSuccess.textContent.includes('Existencia actualizada')) {
+                document.querySelectorAll('.existencia-editable').forEach(element => {
+                    element.style.animation = 'pulse 2s ease-in-out';
+                });
+            }
+        });
+
+        // Agregar estilos de animación dinámicamente
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes pulse {
+                0% { transform: scale(1); }
+                50% { transform: scale(1.05); box-shadow: 0 0 10px rgba(0,123,255,0.5); }
+                100% { transform: scale(1); }
+            }
+        `;
+        document.head.appendChild(style);
+    </script>
 </body>
 </html>
