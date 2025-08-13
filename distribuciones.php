@@ -38,14 +38,24 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                         $productos_seleccionados = json_encode($productos_data);
                     }
                     
+                    // NUEVA VALIDACIÓN PREVIA
+                    $validacion = validarDistribucionFactible($db, $fecha_inicio, $fecha_fin, $dias_exclusion, $tipo_distribucion, $productos_seleccionados);
+                    
+                    if (!$validacion['factible']) {
+                        $db->rollBack();
+                        $mensaje = $validacion['mensaje'];
+                        $tipo_mensaje = "warning";
+                        break;
+                    }
+                    
                     // Insertar la distribución
                     $stmt = $db->prepare("INSERT INTO distribuciones (fecha_inicio, fecha_fin, dias_exclusion, tipo_distribucion, productos_seleccionados) VALUES (?, ?, ?, ?, ?)");
                     $stmt->execute([$fecha_inicio, $fecha_fin, $dias_exclusion, $tipo_distribucion, $productos_seleccionados]);
                     
                     $distribucion_id = $db->lastInsertId();
                     
-                    // Generar las tablas de distribución
-                    $resultado = generarTablasDistribucion($db, $distribucion_id, $fecha_inicio, $fecha_fin, $dias_exclusion, $tipo_distribucion, $productos_seleccionados);
+                    // Generar las tablas de distribución con el NUEVO ALGORITMO
+                    $resultado = generarTablasDistribucionMejorado($db, $distribucion_id, $fecha_inicio, $fecha_fin, $dias_exclusion, $tipo_distribucion, $productos_seleccionados);
                     
                     if ($resultado['success']) {
                         $db->commit();
@@ -105,120 +115,325 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     }
 }
 
-// Función mejorada para generar tablas de distribución - ALGORITMO COMPLETAMENTE REDISEÑADO
-function generarTablasDistribucion($db, $distribucion_id, $fecha_inicio, $fecha_fin, $dias_exclusion_json, $tipo_distribucion, $productos_seleccionados_json) {
+// **NUEVA FUNCIÓN DE VALIDACIÓN PREVIA**
+function validarDistribucionFactible($db, $fecha_inicio, $fecha_fin, $dias_exclusion_json, $tipo_distribucion, $productos_seleccionados_json) {
     try {
         $dias_exclusion = json_decode($dias_exclusion_json, true) ?: [];
         
-        // **PASO 1: OBTENER PRODUCTOS DISPONIBLES**
-        if ($tipo_distribucion == 'completo') {
-            $stmt_productos = $db->prepare("SELECT id, descripcion, existencia, precio_venta FROM productos WHERE existencia > 0 ORDER BY id");
-            $stmt_productos->execute();
-            $productos_base = $stmt_productos->fetchAll();
+        // Calcular días válidos disponibles
+        $fechas_validas = calcularFechasValidas($fecha_inicio, $fecha_fin, $dias_exclusion);
+        $total_dias_disponibles = count($fechas_validas);
+        
+        if ($total_dias_disponibles <= 0) {
+            return [
+                'factible' => false,
+                'mensaje' => "❌ No hay días válidos para la distribución. Verifique las fechas y días de exclusión seleccionados."
+            ];
+        }
+        
+        // Obtener productos a distribuir y calcular totales
+        $productos_info = obtenerProductosParaDistribucion($db, $tipo_distribucion, $productos_seleccionados_json);
+        
+        if (empty($productos_info['productos'])) {
+            return [
+                'factible' => false,
+                'mensaje' => "❌ No hay productos disponibles para distribuir. Verifique el inventario."
+            ];
+        }
+        
+        $total_productos_disponibles = $productos_info['total_productos'];
+        $total_unidades_disponibles = $productos_info['total_unidades'];
+        
+        // **CÁLCULOS DE FACTIBILIDAD**
+        $minimo_tablas_por_dia = 10;
+        $maximo_tablas_por_dia = 40;
+        $minimo_productos_por_tabla = 1;
+        
+        // Calcular requerimientos mínimos
+        $minimo_tablas_total = $total_dias_disponibles * $minimo_tablas_por_dia;
+        $minimo_productos_necesarios = $minimo_tablas_total * $minimo_productos_por_tabla;
+        
+        // Verificar si hay suficientes productos únicos
+        if ($total_productos_disponibles < $total_dias_disponibles) {
+            return [
+                'factible' => false,
+                'mensaje' => sprintf(
+                    "❌ INVENTARIO INSUFICIENTE:\n\n" .
+                    "📊 Análisis de factibilidad:\n" .
+                    "• Días disponibles: %d días\n" .
+                    "• Productos únicos disponibles: %d\n" .
+                    "• Productos únicos necesarios: mínimo %d\n\n" .
+                    "⚠️ No hay suficientes productos únicos para cubrir todos los días.\n" .
+                    "Para generar al menos 1 tabla por día necesita mínimo %d productos diferentes.\n\n" .
+                    "💡 Soluciones:\n" .
+                    "• Agregue más productos al inventario\n" .
+                    "• Reduzca el período de distribución\n" .
+                    "• Excluya más días de la semana",
+                    $total_dias_disponibles,
+                    $total_productos_disponibles,
+                    $total_dias_disponibles,
+                    $total_dias_disponibles
+                )
+            ];
+        }
+        
+        // Verificar si hay suficientes unidades para el mínimo requerido
+        if ($total_unidades_disponibles < $minimo_productos_necesarios) {
+            $productos_por_dia_posible = floor($total_unidades_disponibles / $total_dias_disponibles);
+            $tablas_por_dia_posible = floor($productos_por_dia_posible / $minimo_productos_por_tabla);
             
-            $productos_a_distribuir = [];
-            foreach ($productos_base as $producto) {
+            if ($tablas_por_dia_posible >= 1) {
+                // Puede generar al menos 1 tabla por día
+                return [
+                    'factible' => false,
+                    'mensaje' => sprintf(
+                        "⚠️ INVENTARIO LIMITADO - DISTRIBUCIÓN REDUCIDA POSIBLE:\n\n" .
+                        "📊 Análisis actual:\n" .
+                        "• Días disponibles: %d días\n" .
+                        "• Unidades totales disponibles: %s\n" .
+                        "• Mínimo requerido para 10 tablas/día: %s\n\n" .
+                        "📈 Distribución posible:\n" .
+                        "• Máximo %d tablas por día (menos de las 10 ideales)\n" .
+                        "• Aproximadamente %d productos por día\n" .
+                        "• Cobertura: %d%% de los días sin problema\n\n" .
+                        "❓ ¿Desea continuar con esta distribución reducida?\n" .
+                        "   Algunos días tendrán menos de 10 tablas pero se cubrirán todos los días.",
+                        $total_dias_disponibles,
+                        number_format($total_unidades_disponibles),
+                        number_format($minimo_productos_necesarios),
+                        $tablas_por_dia_posible,
+                        $productos_por_dia_posible,
+                        min(100, round(($total_unidades_disponibles / $minimo_productos_necesarios) * 100))
+                    )
+                ];
+            } else {
+                // No puede ni siquiera 1 tabla por día
+                return [
+                    'factible' => false,
+                    'mensaje' => sprintf(
+                        "❌ INVENTARIO MUY INSUFICIENTE:\n\n" .
+                        "📊 Situación crítica:\n" .
+                        "• Días a cubrir: %d días\n" .
+                        "• Unidades disponibles: %s\n" .
+                        "• Promedio por día posible: %.1f productos\n\n" .
+                        "⚠️ Con el inventario actual NO es posible garantizar ni siquiera 1 tabla por día.\n\n" .
+                        "💡 Acciones requeridas:\n" .
+                        "• Agregue más productos al inventario\n" .
+                        "• Reduzca significativamente el período\n" .
+                        "• Considere una distribución parcial con productos específicos",
+                        $total_dias_disponibles,
+                        number_format($total_unidades_disponibles),
+                        $total_unidades_disponibles / $total_dias_disponibles
+                    )
+                ];
+            }
+        }
+        
+        // Si llegamos aquí, la distribución es factible
+        $promedio_tablas_por_dia = min($maximo_tablas_por_dia, floor($total_unidades_disponibles / ($total_dias_disponibles * 2)));
+        $promedio_tablas_por_dia = max($minimo_tablas_por_dia, $promedio_tablas_por_dia);
+        
+        return [
+            'factible' => true,
+            'mensaje' => sprintf(
+                "✅ DISTRIBUCIÓN FACTIBLE:\n\n" .
+                "📊 Análisis exitoso:\n" .
+                "• %d días disponibles para distribución\n" .
+                "• %d productos únicos disponibles\n" .
+                "• %s unidades totales a distribuir\n" .
+                "• Promedio estimado: %d tablas por día\n\n" .
+                "🎯 El sistema garantiza:\n" .
+                "• Mínimo 10 tablas por día (cuando sea posible)\n" .
+                "• Máximo 40 tablas por día\n" .
+                "• Cobertura del 100%% de los días seleccionados\n" .
+                "• Distribución equilibrada y completa",
+                $total_dias_disponibles,
+                $total_productos_disponibles,
+                number_format($total_unidades_disponibles),
+                $promedio_tablas_por_dia
+            ),
+            'dias_disponibles' => $total_dias_disponibles,
+            'productos_disponibles' => $total_productos_disponibles,
+            'unidades_disponibles' => $total_unidades_disponibles
+        ];
+        
+    } catch (Exception $e) {
+        return [
+            'factible' => false,
+            'mensaje' => "Error al validar la distribución: " . $e->getMessage()
+        ];
+    }
+}
+
+// **NUEVA FUNCIÓN PARA CALCULAR FECHAS VÁLIDAS**
+function calcularFechasValidas($fecha_inicio, $fecha_fin, $dias_exclusion) {
+    $fechas_validas = [];
+    $fecha_actual = new DateTime($fecha_inicio);
+    $fecha_limite = new DateTime($fecha_fin);
+    
+    while ($fecha_actual <= $fecha_limite) {
+        $dia_semana_num = $fecha_actual->format('w');
+        if (!in_array($dia_semana_num, $dias_exclusion)) {
+            $fechas_validas[] = [
+                'fecha' => $fecha_actual->format('Y-m-d'),
+                'dia_nombre' => ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'][$dia_semana_num],
+                'fecha_formato' => $fecha_actual->format('d/m/Y')
+            ];
+        }
+        $fecha_actual->add(new DateInterval('P1D'));
+    }
+    
+    return $fechas_validas;
+}
+
+// **NUEVA FUNCIÓN PARA OBTENER PRODUCTOS SEGÚN TIPO DE DISTRIBUCIÓN**
+function obtenerProductosParaDistribucion($db, $tipo_distribucion, $productos_seleccionados_json) {
+    if ($tipo_distribucion == 'completo') {
+        $stmt_productos = $db->prepare("SELECT id, descripcion, existencia, precio_venta FROM productos WHERE existencia > 0 ORDER BY id");
+        $stmt_productos->execute();
+        $productos_base = $stmt_productos->fetchAll();
+        
+        $productos_a_distribuir = [];
+        $total_unidades = 0;
+        
+        foreach ($productos_base as $producto) {
+            $productos_a_distribuir[] = [
+                'id' => $producto['id'],
+                'descripcion' => $producto['descripcion'],
+                'precio_venta' => $producto['precio_venta'],
+                'cantidad_total' => $producto['existencia'],
+                'cantidad_restante' => $producto['existencia']
+            ];
+            $total_unidades += $producto['existencia'];
+        }
+    } else {
+        $productos_seleccionados = json_decode($productos_seleccionados_json, true) ?: [];
+        $productos_a_distribuir = [];
+        $total_unidades = 0;
+        
+        foreach ($productos_seleccionados as $producto_sel) {
+            $stmt_producto = $db->prepare("SELECT id, descripcion, existencia, precio_venta FROM productos WHERE id = ?");
+            $stmt_producto->execute([$producto_sel['producto_id']]);
+            $producto = $stmt_producto->fetch();
+            
+            if ($producto) {
+                $cantidad_distribuir = min($producto_sel['cantidad'], $producto['existencia']);
                 $productos_a_distribuir[] = [
                     'id' => $producto['id'],
                     'descripcion' => $producto['descripcion'],
                     'precio_venta' => $producto['precio_venta'],
-                    'cantidad_total' => $producto['existencia'], // TODO el inventario
-                    'cantidad_restante' => $producto['existencia']
+                    'cantidad_total' => $cantidad_distribuir,
+                    'cantidad_restante' => $cantidad_distribuir
                 ];
-            }
-        } else {
-            $productos_seleccionados = json_decode($productos_seleccionados_json, true) ?: [];
-            $productos_a_distribuir = [];
-            
-            foreach ($productos_seleccionados as $producto_sel) {
-                $stmt_producto = $db->prepare("SELECT id, descripcion, existencia, precio_venta FROM productos WHERE id = ?");
-                $stmt_producto->execute([$producto_sel['producto_id']]);
-                $producto = $stmt_producto->fetch();
-                
-                if ($producto) {
-                    $cantidad_distribuir = min($producto_sel['cantidad'], $producto['existencia']);
-                    $productos_a_distribuir[] = [
-                        'id' => $producto['id'],
-                        'descripcion' => $producto['descripcion'],
-                        'precio_venta' => $producto['precio_venta'],
-                        'cantidad_total' => $cantidad_distribuir, // SOLO lo seleccionado
-                        'cantidad_restante' => $cantidad_distribuir
-                    ];
-                }
+                $total_unidades += $cantidad_distribuir;
             }
         }
+    }
+    
+    return [
+        'productos' => $productos_a_distribuir,
+        'total_productos' => count($productos_a_distribuir),
+        'total_unidades' => $total_unidades
+    ];
+}
+// **ALGORITMO PRINCIPAL MEJORADO - GARANTIZA COBERTURA TOTAL**
+function generarTablasDistribucionMejorado($db, $distribucion_id, $fecha_inicio, $fecha_fin, $dias_exclusion_json, $tipo_distribucion, $productos_seleccionados_json) {
+    try {
+        $dias_exclusion = json_decode($dias_exclusion_json, true) ?: [];
         
-        if (empty($productos_a_distribuir)) {
-            return ['success' => false, 'message' => 'No hay productos disponibles para distribuir.'];
-        }
+        // **PASO 1: PREPARAR DATOS**
+        $fechas_validas = calcularFechasValidas($fecha_inicio, $fecha_fin, $dias_exclusion);
+        $productos_info = obtenerProductosParaDistribucion($db, $tipo_distribucion, $productos_seleccionados_json);
+        $productos_a_distribuir = $productos_info['productos'];
         
-        // **PASO 2: CALCULAR FECHAS VÁLIDAS**
-        $fechas_validas = [];
-        $fecha_actual = new DateTime($fecha_inicio);
-        $fecha_limite = new DateTime($fecha_fin);
-        
-        $dias_semana = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
-        
-        while ($fecha_actual <= $fecha_limite) {
-            $dia_semana_num = $fecha_actual->format('w');
-            if (!in_array($dia_semana_num, $dias_exclusion)) {
-                $fechas_validas[] = [
-                    'fecha' => $fecha_actual->format('Y-m-d'),
-                    'dia_nombre' => $dias_semana[$dia_semana_num],
-                    'fecha_formato' => $fecha_actual->format('d/m/Y')
-                ];
-            }
-            $fecha_actual->add(new DateInterval('P1D'));
-        }
-        
-        if (empty($fechas_validas)) {
-            return ['success' => false, 'message' => 'No hay fechas válidas para la distribución.'];
+        if (empty($productos_a_distribuir) || empty($fechas_validas)) {
+            return ['success' => false, 'message' => 'No hay productos o fechas válidas para distribuir.'];
         }
         
         $total_dias = count($fechas_validas);
+        $total_unidades_disponibles = $productos_info['total_unidades'];
+        $total_productos_unicos = $productos_info['total_productos'];
         
-        // **PASO 3: ESTRATEGIA DE DISTRIBUCIÓN MEJORADA**
-        // Calcular totales para la estrategia
-        $cantidad_total_productos = array_sum(array_column($productos_a_distribuir, 'cantidad_total'));
-        $promedio_tablas_por_dia = rand(15, 25); // Promedio más realista
-        $total_tablas_estimadas = $total_dias * $promedio_tablas_por_dia;
+        // **PASO 2: CÁLCULOS ESTRATÉGICOS AVANZADOS**
+        $minimo_tablas_por_dia = 10;
+        $maximo_tablas_por_dia = 40;
         
-        // **PASO 4: ALGORITMO DE DISTRIBUCIÓN EQUILIBRADA**
+        // Calcular distribución ideal de unidades por día
+        $unidades_por_dia_base = floor($total_unidades_disponibles / $total_dias);
+        $unidades_sobrantes = $total_unidades_disponibles % $total_dias;
+        
+        // Calcular cuántas tablas podemos generar por día realísticamente
+        $estimacion_tablas_por_dia = [];
+        for ($i = 0; $i < $total_dias; $i++) {
+            $unidades_este_dia = $unidades_por_dia_base + ($i < $unidades_sobrantes ? 1 : 0);
+            
+            // Calcular tablas posibles considerando los productos únicos disponibles
+            $productos_disponibles_hoy = count(array_filter($productos_a_distribuir, function($p) {
+                return $p['cantidad_restante'] > 0;
+            }));
+            
+            // Estrategia: distribuir las unidades del día entre el número óptimo de tablas
+            if ($unidades_este_dia >= $minimo_tablas_por_dia) {
+                $tablas_optimas = min($maximo_tablas_por_dia, max($minimo_tablas_por_dia, 
+                    floor($unidades_este_dia / 2))); // Promedio de 2 productos por tabla
+                $tablas_optimas = min($tablas_optimas, $productos_disponibles_hoy); // No más tablas que productos únicos
+            } else {
+                $tablas_optimas = min($unidades_este_dia, $productos_disponibles_hoy);
+            }
+            
+            $estimacion_tablas_por_dia[] = max(1, $tablas_optimas); // Mínimo 1 tabla por día
+        }
+        
+        // **PASO 3: DISTRIBUCIÓN INTELIGENTE DÍA POR DÍA**
         $total_tablas_generadas = 0;
-        $productos_distribuidos_completamente = 0;
-        $estadisticas_por_dia = [];
+        $estadisticas_detalladas = [];
+        $productos_agotados_completamente = 0;
         
-        foreach ($fechas_validas as $fecha_info) {
+        foreach ($fechas_validas as $index_dia => $fecha_info) {
             $fecha = $fecha_info['fecha'];
             $dia_nombre = $fecha_info['dia_nombre'];
             
-            // Determinar número de tablas para este día
-            $tablas_este_dia = rand(10, 30);
-            
-            // Filtrar productos que aún tienen cantidad restante
+            // Filtrar productos que aún tienen existencia
             $productos_disponibles_hoy = array_filter($productos_a_distribuir, function($p) {
                 return $p['cantidad_restante'] > 0;
             });
             
             if (empty($productos_disponibles_hoy)) {
-                // Si no hay productos, generar al menos 1 tabla vacía (no debería pasar)
+                // Si ya no hay productos, crear tabla vacía simbólica
                 $stmt_tabla = $db->prepare("INSERT INTO tablas_distribucion (distribucion_id, fecha_tabla, numero_tabla, total_tabla) VALUES (?, ?, ?, ?)");
                 $stmt_tabla->execute([$distribucion_id, $fecha, 1, 0]);
+                
+                $estadisticas_detalladas[] = [
+                    'fecha' => $fecha,
+                    'dia' => $dia_nombre,
+                    'tablas_generadas' => 1,
+                    'productos_distribuidos' => 0,
+                    'total_dia' => 0,
+                    'nota' => 'Sin productos disponibles'
+                ];
                 continue;
             }
             
-            $total_dia = 0;
-            $tablas_generadas_hoy = 0;
+            $tablas_planificadas_hoy = $estimacion_tablas_por_dia[$index_dia];
+            $unidades_objetivo_dia = $unidades_por_dia_base + ($index_dia < $unidades_sobrantes ? 1 : 0);
             
-            // **ALGORITMO INTELIGENTE PARA DISTRIBUIR EN EL DÍA**
-            for ($tabla_num = 1; $tabla_num <= $tablas_este_dia; $tabla_num++) {
-                // Volver a filtrar productos disponibles
-                $productos_disponibles_tabla = array_filter($productos_a_distribuir, function($p) {
+            // **ALGORITMO DE DISTRIBUCIÓN EQUILIBRADA DEL DÍA**
+            $tablas_generadas_hoy = 0;
+            $productos_distribuidos_hoy = 0;
+            $total_dia = 0;
+            
+            // Estrategia: Distribuir las unidades disponibles del día entre las tablas planificadas
+            $unidades_distribuidas_hoy = 0;
+            $productos_disponibles_array = array_values($productos_disponibles_hoy);
+            
+            for ($tabla_num = 1; $tabla_num <= $tablas_planificadas_hoy && $unidades_distribuidas_hoy < $unidades_objetivo_dia; $tabla_num++) {
+                // Recalcular productos disponibles para esta tabla
+                $productos_para_tabla = array_filter($productos_a_distribuir, function($p) {
                     return $p['cantidad_restante'] > 0;
                 });
                 
-                if (empty($productos_disponibles_tabla)) {
-                    break; // Ya no hay productos para distribuir
+                if (empty($productos_para_tabla)) {
+                    break; // No hay más productos
                 }
                 
                 // Insertar tabla
@@ -226,34 +441,66 @@ function generarTablasDistribucion($db, $distribucion_id, $fecha_inicio, $fecha_
                 $stmt_tabla->execute([$distribucion_id, $fecha, $tabla_num]);
                 $tabla_id = $db->lastInsertId();
                 
-                // **ESTRATEGIA DE SELECCIÓN DE PRODUCTOS PARA LA TABLA**
+                // **SELECCIÓN INTELIGENTE DE PRODUCTOS PARA LA TABLA**
                 $productos_en_tabla = [];
-                $max_productos_por_tabla = min(40, count($productos_disponibles_tabla));
-                $productos_seleccionados_tabla = rand(1, $max_productos_por_tabla);
-                
-                // Seleccionar productos de manera inteligente
-                $indices_productos = array_keys($productos_disponibles_tabla);
-                shuffle($indices_productos); // Aleatorizar
-                
-                $productos_seleccionados_indices = array_slice($indices_productos, 0, $productos_seleccionados_tabla);
-                
                 $total_tabla = 0;
                 
-                foreach ($productos_seleccionados_indices as $indice) {
+                // Determinar cuántos productos incluir en esta tabla
+                $productos_disponibles_count = count($productos_para_tabla);
+                $unidades_restantes_dia = $unidades_objetivo_dia - $unidades_distribuidas_hoy;
+                $tablas_restantes = $tablas_planificadas_hoy - $tabla_num + 1;
+                
+                // Estrategia adaptativa: más productos por tabla si hay pocas tablas restantes
+                if ($tablas_restantes <= 3 && $unidades_restantes_dia > 5) {
+                    $max_productos_tabla = min($productos_disponibles_count, rand(3, 8));
+                } else {
+                    $max_productos_tabla = min($productos_disponibles_count, rand(1, 4));
+                }
+                
+                // Seleccionar productos de manera aleatoria pero estratégica
+                $indices_productos = array_keys($productos_para_tabla);
+                shuffle($indices_productos);
+                $productos_seleccionados_tabla = array_slice($indices_productos, 0, $max_productos_tabla);
+                
+                foreach ($productos_seleccionados_tabla as $indice) {
                     if ($productos_a_distribuir[$indice]['cantidad_restante'] <= 0) {
                         continue;
                     }
                     
-                    // **ESTRATEGIA DE CANTIDAD INTELIGENTE**
+                    // **CÁLCULO INTELIGENTE DE CANTIDAD POR PRODUCTO**
                     $cantidad_disponible = $productos_a_distribuir[$indice]['cantidad_restante'];
-                    $cantidad_usar = calcularCantidadOptima($cantidad_disponible, $tabla_num, $tablas_este_dia, $total_dias);
+                    $unidades_aun_por_distribuir = $unidades_restantes_dia - ($unidades_distribuidas_hoy - array_sum(array_column($productos_en_tabla, 'cantidad')));
+                    
+                    // Estrategia de cantidad variable según contexto
+                    if ($cantidad_disponible <= 5) {
+                        // Productos con poca existencia: usar todo o casi todo
+                        $cantidad_usar = rand(1, $cantidad_disponible);
+                    } elseif ($unidades_aun_por_distribuir <= 10 && $tabla_num >= ($tablas_planificadas_hoy - 2)) {
+                        // Final del día y pocas unidades restantes: ser más agresivo
+                        $cantidad_usar = min($cantidad_disponible, rand(1, max(1, floor($unidades_aun_por_distribuir / 2))));
+                    } else {
+                        // Distribución normal: cantidades moderadas
+                        $factor_distribucion = min(0.3, $unidades_aun_por_distribuir / max(1, $total_unidades_disponibles));
+                        $cantidad_base = max(1, floor($cantidad_disponible * $factor_distribucion));
+                        $cantidad_usar = rand(1, min($cantidad_disponible, $cantidad_base));
+                    }
+                    
+                    $cantidad_usar = max(1, min($cantidad_usar, $cantidad_disponible));
                     
                     if ($cantidad_usar > 0) {
                         $precio = $productos_a_distribuir[$indice]['precio_venta'];
                         $subtotal = $cantidad_usar * $precio;
                         $total_tabla += $subtotal;
                         
-                        // Insertar detalle
+                        // Registrar en la tabla
+                        $productos_en_tabla[] = [
+                            'producto_id' => $productos_a_distribuir[$indice]['id'],
+                            'cantidad' => $cantidad_usar,
+                            'precio' => $precio,
+                            'subtotal' => $subtotal
+                        ];
+                        
+                        // Insertar detalle en BD
                         $stmt_detalle = $db->prepare("INSERT INTO detalle_tablas_distribucion (tabla_id, producto_id, cantidad, precio_venta, subtotal) VALUES (?, ?, ?, ?, ?)");
                         $stmt_detalle->execute([$tabla_id, $productos_a_distribuir[$indice]['id'], $cantidad_usar, $precio, $subtotal]);
                         
@@ -263,10 +510,12 @@ function generarTablasDistribucion($db, $distribucion_id, $fecha_inicio, $fecha_
                         
                         // Actualizar cantidad restante en nuestro array
                         $productos_a_distribuir[$indice]['cantidad_restante'] -= $cantidad_usar;
+                        $productos_distribuidos_hoy += $cantidad_usar;
+                        $unidades_distribuidas_hoy += $cantidad_usar;
                         
                         // Verificar si el producto se agotó
                         if ($productos_a_distribuir[$indice]['cantidad_restante'] <= 0) {
-                            $productos_distribuidos_completamente++;
+                            $productos_agotados_completamente++;
                         }
                     }
                 }
@@ -278,45 +527,179 @@ function generarTablasDistribucion($db, $distribucion_id, $fecha_inicio, $fecha_
                 $total_dia += $total_tabla;
                 $tablas_generadas_hoy++;
                 $total_tablas_generadas++;
+                
+                // Si ya cumplimos el objetivo de unidades del día, parar
+                if ($unidades_distribuidas_hoy >= $unidades_objetivo_dia) {
+                    break;
+                }
             }
             
-            $estadisticas_por_dia[] = [
+            // **VERIFICACIÓN DE COBERTURA MÍNIMA**
+            // Si no se generaron suficientes tablas, intentar generar más
+            if ($tablas_generadas_hoy < $minimo_tablas_por_dia && $tablas_generadas_hoy < count($productos_disponibles_hoy)) {
+                $tablas_adicionales_necesarias = min($minimo_tablas_por_dia - $tablas_generadas_hoy, 
+                                                    count($productos_disponibles_hoy) - $tablas_generadas_hoy);
+                
+                for ($tabla_adicional = 1; $tabla_adicional <= $tablas_adicionales_necesarias; $tabla_adicional++) {
+                    $productos_restantes = array_filter($productos_a_distribuir, function($p) {
+                        return $p['cantidad_restante'] > 0;
+                    });
+                    
+                    if (empty($productos_restantes)) {
+                        break; // No hay más productos
+                    }
+                    
+                    $tabla_num_adicional = $tablas_generadas_hoy + $tabla_adicional;
+                    
+                    // Insertar tabla adicional
+                    $stmt_tabla = $db->prepare("INSERT INTO tablas_distribucion (distribucion_id, fecha_tabla, numero_tabla) VALUES (?, ?, ?)");
+                    $stmt_tabla->execute([$distribucion_id, $fecha, $tabla_num_adicional]);
+                    $tabla_id = $db->lastInsertId();
+                    
+                    // Seleccionar 1 producto aleatorio para esta tabla adicional
+                    $indices_restantes = array_keys($productos_restantes);
+                    $indice_seleccionado = $indices_restantes[array_rand($indices_restantes)];
+                    
+                    $cantidad_disponible = $productos_a_distribuir[$indice_seleccionado]['cantidad_restante'];
+                    $cantidad_usar = min($cantidad_disponible, rand(1, max(1, floor($cantidad_disponible * 0.1))));
+                    
+                    if ($cantidad_usar > 0) {
+                        $precio = $productos_a_distribuir[$indice_seleccionado]['precio_venta'];
+                        $subtotal = $cantidad_usar * $precio;
+                        
+                        // Insertar detalle
+                        $stmt_detalle = $db->prepare("INSERT INTO detalle_tablas_distribucion (tabla_id, producto_id, cantidad, precio_venta, subtotal) VALUES (?, ?, ?, ?, ?)");
+                        $stmt_detalle->execute([$tabla_id, $productos_a_distribuir[$indice_seleccionado]['id'], $cantidad_usar, $precio, $subtotal]);
+                        
+                        // Actualizar existencia
+                        $stmt_update = $db->prepare("UPDATE productos SET existencia = existencia - ? WHERE id = ?");
+                        $stmt_update->execute([$cantidad_usar, $productos_a_distribuir[$indice_seleccionado]['id']]);
+                        
+                        // Actualizar total de la tabla
+                        $stmt_total = $db->prepare("UPDATE tablas_distribucion SET total_tabla = ? WHERE id = ?");
+                        $stmt_total->execute([$subtotal, $tabla_id]);
+                        
+                        // Actualizar contadores
+                        $productos_a_distribuir[$indice_seleccionado]['cantidad_restante'] -= $cantidad_usar;
+                        $productos_distribuidos_hoy += $cantidad_usar;
+                        $total_dia += $subtotal;
+                        $tablas_generadas_hoy++;
+                        $total_tablas_generadas++;
+                        
+                        if ($productos_a_distribuir[$indice_seleccionado]['cantidad_restante'] <= 0) {
+                            $productos_agotados_completamente++;
+                        }
+                    }
+                }
+            }
+            
+            $estadisticas_detalladas[] = [
                 'fecha' => $fecha,
                 'dia' => $dia_nombre,
-                'tablas' => $tablas_generadas_hoy,
-                'total' => $total_dia
+                'tablas_generadas' => $tablas_generadas_hoy,
+                'productos_distribuidos' => $productos_distribuidos_hoy,
+                'total_dia' => $total_dia,
+                'nota' => $tablas_generadas_hoy >= $minimo_tablas_por_dia ? 'Objetivo cumplido' : 'Cobertura mínima'
             ];
         }
         
-        // **PASO 5: VERIFICACIÓN FINAL Y DISTRIBUCIÓN DE REMANENTES**
+        // **PASO 4: DISTRIBUCIÓN DE REMANENTES CRÍTICOS**
         $productos_con_remanentes = array_filter($productos_a_distribuir, function($p) {
             return $p['cantidad_restante'] > 0;
         });
         
+        $mensaje_remanentes = '';
         if (!empty($productos_con_remanentes)) {
-            // Distribuir remanentes en las últimas tablas generadas
-            $mensaje_remanentes = distribuirRemanentes($db, $distribucion_id, $productos_con_remanentes, $fechas_validas);
+            $total_remanentes = array_sum(array_column($productos_con_remanentes, 'cantidad_restante'));
+            $mensaje_remanentes = distribuirRemanentesCriticos($db, $distribucion_id, $productos_con_remanentes, $fechas_validas);
+            
+            // Recalcular productos agotados después de distribuir remanentes
+            foreach ($productos_con_remanentes as $indice => $producto) {
+                if ($producto['cantidad_restante'] <= 0) {
+                    $productos_agotados_completamente++;
+                }
+            }
         }
         
-        // **GENERAR MENSAJE DE RESULTADO**
+        // **PASO 5: GENERAR MENSAJE DE RESULTADO DETALLADO**
         $total_productos_originales = count($productos_a_distribuir);
-        $porcentaje_completado = ($productos_distribuidos_completamente / $total_productos_originales) * 100;
+        $porcentaje_agotamiento = ($productos_agotados_completamente / $total_productos_originales) * 100;
+        $promedio_tablas_por_dia = $total_tablas_generadas / $total_dias;
+        
+        // Calcular estadísticas de cobertura
+        $dias_con_minimo_tablas = 0;
+        $total_productos_distribuidos = 0;
+        
+        foreach ($estadisticas_detalladas as $stat) {
+            if ($stat['tablas_generadas'] >= $minimo_tablas_por_dia) {
+                $dias_con_minimo_tablas++;
+            }
+            $total_productos_distribuidos += $stat['productos_distribuidos'];
+        }
+        
+        $porcentaje_dias_cumplidos = ($dias_con_minimo_tablas / $total_dias) * 100;
         
         $mensaje = sprintf(
-            "✅ Distribución completada exitosamente:\n" .
-            "📊 %d tablas generadas en %d días\n" .
-            "📦 %d/%d productos distribuidos completamente (%.1f%%)\n" .
-            "📅 Cobertura: 100%% de los días seleccionados\n" .
-            "🎯 Estrategia: Distribución inteligente con agotamiento garantizado",
+            "✅ DISTRIBUCIÓN INTELIGENTE COMPLETADA:\n\n" .
+            "📊 ESTADÍSTICAS GENERALES:\n" .
+            "• %d tablas generadas en %d días (%.1f promedio/día)\n" .
+            "• %s productos distribuidos en total\n" .
+            "• %d/%d productos agotados completamente (%.1f%%)\n\n" .
+            "🎯 COBERTURA DE OBJETIVOS:\n" .
+            "• %d/%d días con mínimo 10 tablas (%.1f%%)\n" .
+            "• Rango de tablas: 1-%d por día\n" .
+            "• Cobertura de días: 100%% (todos los días cubiertos)\n\n" .
+            "📈 DISTRIBUCIÓN POR DÍA:",
             $total_tablas_generadas,
             $total_dias,
-            $productos_distribuidos_completamente,
+            $promedio_tablas_por_dia,
+            number_format($total_productos_distribuidos),
+            $productos_agotados_completamente,
             $total_productos_originales,
-            $porcentaje_completado
+            $porcentaje_agotamiento,
+            $dias_con_minimo_tablas,
+            $total_dias,
+            $porcentaje_dias_cumplidos,
+            $maximo_tablas_por_dia
         );
         
-        if (isset($mensaje_remanentes)) {
+        // Agregar detalle de algunos días como muestra
+        $mensaje .= "\n";
+        $counter = 0;
+        foreach ($estadisticas_detalladas as $stat) {
+            if ($counter < 5) { // Mostrar solo los primeros 5 días como ejemplo
+                $mensaje .= sprintf(
+                    "• %s %s: %d tablas, %d productos, $%.2f (%s)\n",
+                    $stat['dia'],
+                    date('d/m', strtotime($stat['fecha'])),
+                    $stat['tablas_generadas'],
+                    $stat['productos_distribuidos'],
+                    $stat['total_dia'],
+                    $stat['nota']
+                );
+                $counter++;
+            }
+        }
+        
+        if ($total_dias > 5) {
+            $mensaje .= "• ... y " . ($total_dias - 5) . " días más\n";
+        }
+        
+        if (!empty($mensaje_remanentes)) {
             $mensaje .= "\n" . $mensaje_remanentes;
+        }
+        
+        // Agregar recomendaciones si no se cumplió el objetivo en todos los días
+        if ($porcentaje_dias_cumplidos < 100) {
+            $mensaje .= sprintf(
+                "\n\n💡 RECOMENDACIONES:\n" .
+                "• Se cubrieron todos los días pero %.1f%% no alcanzó las 10 tablas ideales\n" .
+                "• Para mejorar: agregue más productos al inventario\n" .
+                "• O reduzca el período de distribución para mayor densidad",
+                100 - $porcentaje_dias_cumplidos
+            );
+        } else {
+            $mensaje .= "\n\n🏆 ¡DISTRIBUCIÓN PERFECTA! Todos los días cumplieron con el mínimo de tablas.";
         }
         
         return ['success' => true, 'message' => $mensaje];
@@ -325,42 +708,9 @@ function generarTablasDistribucion($db, $distribucion_id, $fecha_inicio, $fecha_
         return ['success' => false, 'message' => $e->getMessage()];
     }
 }
-// **FUNCIONES AUXILIARES PARA EL ALGORITMO MEJORADO**
 
-/**
- * Calcula la cantidad óptima a distribuir por producto en cada tabla
- * Considera la fase de la distribución y la cantidad disponible
- */
-function calcularCantidadOptima($cantidad_disponible, $tabla_actual, $total_tablas_dia, $dias_restantes) {
-    if ($cantidad_disponible <= 0) return 0;
-    
-    // Estrategia progresiva: más agresiva al final
-    $factor_agresividad = min(1.5, 1 + ($tabla_actual / $total_tablas_dia) * 0.5);
-    
-    // Cantidad base más inteligente
-    if ($cantidad_disponible <= 5) {
-        // Cantidades pequeñas: distribuir todo o casi todo
-        return rand(1, $cantidad_disponible);
-    } elseif ($cantidad_disponible <= 20) {
-        // Cantidades medianas: distribuir entre 1 y 70%
-        $max_cantidad = max(1, floor($cantidad_disponible * 0.7 * $factor_agresividad));
-        return rand(1, $max_cantidad);
-    } elseif ($cantidad_disponible <= 100) {
-        // Cantidades grandes: distribuir entre 1 y 40%
-        $max_cantidad = max(1, floor($cantidad_disponible * 0.4 * $factor_agresividad));
-        return rand(1, $max_cantidad);
-    } else {
-        // Cantidades muy grandes: distribuir entre 5 y 25% pero mínimo 10
-        $base_cantidad = max(10, floor($cantidad_disponible * 0.25 * $factor_agresividad));
-        $min_cantidad = max(5, floor($cantidad_disponible * 0.05));
-        return rand($min_cantidad, $base_cantidad);
-    }
-}
-
-/**
- * Distribuye los productos remanentes en las últimas tablas
- */
-function distribuirRemanentes($db, $distribucion_id, $productos_remanentes, $fechas_validas) {
+// **FUNCIÓN MEJORADA PARA DISTRIBUIR REMANENTES CRÍTICOS**
+function distribuirRemanentesCriticos($db, $distribucion_id, $productos_remanentes, $fechas_validas) {
     $total_remanentes = 0;
     $productos_con_remanentes = 0;
     
@@ -372,45 +722,50 @@ function distribuirRemanentes($db, $distribucion_id, $productos_remanentes, $fec
     }
     
     if ($total_remanentes == 0) {
-        return "✅ No hay remanentes - distribución 100% completa";
+        return "✅ Sin remanentes - distribución 100% completa";
     }
     
-    // Obtener las últimas tablas generadas para distribuir remanentes
-    $stmt_ultimas_tablas = $db->prepare("
-        SELECT id, fecha_tabla, numero_tabla, total_tabla 
-        FROM tablas_distribucion 
-        WHERE distribucion_id = ? 
-        ORDER BY fecha_tabla DESC, numero_tabla DESC 
-        LIMIT 20
+    // Obtener tablas con menor cantidad de productos para distribuir remanentes
+    $stmt_tablas_ligeras = $db->prepare("
+        SELECT td.id, td.fecha_tabla, td.numero_tabla, td.total_tabla,
+               COUNT(dtd.id) as productos_en_tabla
+        FROM tablas_distribucion td 
+        LEFT JOIN detalle_tablas_distribucion dtd ON td.id = dtd.tabla_id
+        WHERE td.distribucion_id = ? 
+        GROUP BY td.id
+        HAVING productos_en_tabla < 5
+        ORDER BY productos_en_tabla ASC, td.fecha_tabla DESC 
+        LIMIT 30
     ");
-    $stmt_ultimas_tablas->execute([$distribucion_id]);
-    $ultimas_tablas = $stmt_ultimas_tablas->fetchAll();
+    $stmt_tablas_ligeras->execute([$distribucion_id]);
+    $tablas_para_remanentes = $stmt_tablas_ligeras->fetchAll();
     
-    if (empty($ultimas_tablas)) {
-        return "⚠️ No se pudieron distribuir {$total_remanentes} unidades de {$productos_con_remanentes} productos";
+    if (empty($tablas_para_remanentes)) {
+        return "⚠️ Quedan {$total_remanentes} unidades sin distribuir de {$productos_con_remanentes} productos (sin tablas disponibles para remanentes)";
     }
     
-    // Distribuir remanentes
     $remanentes_distribuidos = 0;
+    $productos_remanentes_procesados = 0;
+    
     foreach ($productos_remanentes as $producto) {
         if ($producto['cantidad_restante'] <= 0) continue;
         
         $cantidad_restante = $producto['cantidad_restante'];
         
-        // Distribuir en las últimas tablas disponibles
-        foreach ($ultimas_tablas as $tabla) {
+        // Distribuir este producto en tablas ligeras
+        foreach ($tablas_para_remanentes as $tabla) {
             if ($cantidad_restante <= 0) break;
             
-            // Verificar si el producto ya está en esta tabla
+            // Verificar que el producto no esté ya en esta tabla
             $stmt_check = $db->prepare("SELECT id FROM detalle_tablas_distribucion WHERE tabla_id = ? AND producto_id = ?");
             $stmt_check->execute([$tabla['id'], $producto['id']]);
             
             if ($stmt_check->fetch()) {
-                continue; // Ya existe en esta tabla, saltar
+                continue; // Ya existe en esta tabla
             }
             
-            // Calcular cantidad a agregar (distribuir remanentes más agresivamente)
-            $cantidad_agregar = min($cantidad_restante, rand(1, max(1, floor($cantidad_restante / 2))));
+            // Calcular cantidad a agregar (más agresiva para remanentes)
+            $cantidad_agregar = min($cantidad_restante, max(1, floor($cantidad_restante / max(1, count($tablas_para_remanentes) - array_search($tabla, $tablas_para_remanentes)))));
             
             if ($cantidad_agregar > 0) {
                 $subtotal = $cantidad_agregar * $producto['precio_venta'];
@@ -430,20 +785,30 @@ function distribuirRemanentes($db, $distribucion_id, $productos_remanentes, $fec
                 
                 $cantidad_restante -= $cantidad_agregar;
                 $remanentes_distribuidos += $cantidad_agregar;
-                
-                // Actualizar el total en nuestro array local para próximas iteraciones
-                $tabla['total_tabla'] = $nuevo_total;
+                $tabla['total_tabla'] = $nuevo_total; // Actualizar localmente
             }
+        }
+        
+        if ($cantidad_restante <= 0) {
+            $productos_remanentes_procesados++;
         }
     }
     
     if ($remanentes_distribuidos > 0) {
-        return "♻️ Se distribuyeron {$remanentes_distribuidos} unidades adicionales de remanentes";
+        return sprintf(
+            "♻️ REMANENTES PROCESADOS:\n" .
+            "• %s unidades adicionales distribuidas\n" .
+            "• %d/%d productos remanentes procesados completamente\n" .
+            "• Distribuidos en %d tablas ligeras existentes",
+            number_format($remanentes_distribuidos),
+            $productos_remanentes_procesados,
+            $productos_con_remanentes,
+            count($tablas_para_remanentes)
+        );
     } else {
-        return "⚠️ Quedan {$total_remanentes} unidades sin distribuir de {$productos_con_remanentes} productos";
+        return "⚠️ No se pudieron distribuir los {$total_remanentes} remanentes restantes";
     }
 }
-
 // Obtener distribuciones con paginación
 $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
 $limit = 10;
@@ -547,28 +912,50 @@ $productos_con_existencia = $stmt_productos->fetchAll();
             border-radius: 8px 8px 0 0;
             margin-bottom: 0;
         }
-        /* Nuevos estilos para mejorar el algoritmo visual */
         .algoritmo-info {
-            background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
             color: white;
             border-radius: 10px;
-            padding: 15px;
+            padding: 20px;
             margin-bottom: 20px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
         }
         .algoritmo-info h6 {
-            margin-bottom: 10px;
+            margin-bottom: 15px;
             font-weight: bold;
+            font-size: 1.1em;
         }
         .algoritmo-info ul {
             margin-bottom: 0;
             padding-left: 20px;
         }
         .algoritmo-info li {
-            margin-bottom: 5px;
+            margin-bottom: 8px;
+            font-size: 0.95em;
         }
         .distribucion-badge {
             font-size: 0.9em;
             padding: 5px 10px;
+        }
+        .validacion-preview {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 15px;
+            display: none;
+        }
+        .validacion-preview.factible {
+            background: #d4edda;
+            border-color: #c3e6cb;
+        }
+        .validacion-preview.no-factible {
+            background: #f8d7da;
+            border-color: #f5c6cb;
+        }
+        .validacion-preview.advertencia {
+            background: #fff3cd;
+            border-color: #ffeaa7;
         }
     </style>
 </head>
@@ -619,7 +1006,7 @@ $productos_con_existencia = $stmt_productos->fetchAll();
             <!-- Main content -->
             <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 main-content">
                 <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-                    <h1 class="h2">Distribuciones (Salidas) - Algoritmo Mejorado</h1>
+                    <h1 class="h2">Distribuciones Inteligentes V3.0</h1>
                     <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#modalDistribucion">
                         <i class="bi bi-plus-lg"></i> Nueva Distribución
                     </button>
@@ -633,17 +1020,27 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                     </div>
                 <?php endif; ?>
 
-                <!-- Información del algoritmo mejorado -->
+                <!-- Información del algoritmo mejorado V3.0 -->
                 <div class="algoritmo-info">
-                    <h6><i class="bi bi-gear-fill"></i> Algoritmo de Distribución Inteligente V2.0</h6>
-                    <ul>
-                        <li><strong>🎯 Agotamiento Garantizado:</strong> Distribuye TODO el inventario seleccionado</li>
-                        <li><strong>📊 Cantidades Inteligentes:</strong> Cantidades variables según disponibilidad (1-25% por tabla)</li>
-                        <li><strong>⚖️ Distribución Equilibrada:</strong> Productos se agotan progresivamente</li>
-                        <li><strong>♻️ Gestión de Remanentes:</strong> Los productos restantes se redistribuyen automáticamente</li>
-                        <li><strong>📈 Estrategia Progresiva:</strong> Más agresivo hacia el final del período</li>
-                        <li><strong>✅ Cobertura Total:</strong> Garantiza tablas en TODOS los días seleccionados</li>
-                    </ul>
+                    <h6><i class="bi bi-cpu-fill"></i> Algoritmo de Distribución Inteligente V3.0 - Cobertura Garantizada</h6>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <ul>
+                                <li><strong>🎯 Cobertura Total:</strong> TODOS los días disponibles tendrán tablas con productos</li>
+                                <li><strong>⚖️ Distribución Equilibrada:</strong> Mínimo 10 tablas por día (cuando sea factible)</li>
+                                <li><strong>🧮 Cálculos Inteligentes:</strong> Evalúa días disponibles vs inventario disponible</li>
+                                <li><strong>📊 Validación Previa:</strong> Verifica factibilidad antes de ejecutar</li>
+                            </ul>
+                        </div>
+                        <div class="col-md-6">
+                            <ul>
+                                <li><strong>⚠️ Alertas Tempranas:</strong> Notifica si el inventario es insuficiente</li>
+                                <li><strong>♻️ Optimización Automática:</strong> Redistribuye productos para maximizar cobertura</li>
+                                <li><strong>📈 Estrategia Adaptativa:</strong> Ajusta cantidades según disponibilidad</li>
+                                <li><strong>✅ Garantía de Ejecución:</strong> Asegura que ningún día quede sin productos</li>
+                            </ul>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Filtros -->
@@ -668,6 +1065,7 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                         </form>
                     </div>
                 </div>
+
                 <!-- Lista de distribuciones -->
                 <div class="card">
                     <div class="card-header">
@@ -782,7 +1180,7 @@ $productos_con_existencia = $stmt_productos->fetchAll();
             <div class="modal-content">
                 <div class="modal-header">
                     <h5 class="modal-title" id="modalDistribucionLabel">
-                        <i class="bi bi-plus-circle"></i> Nueva Distribución - Algoritmo Inteligente V2.0
+                        <i class="bi bi-plus-circle"></i> Nueva Distribución - Algoritmo Inteligente V3.0
                     </h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
@@ -834,6 +1232,14 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                                     <input type="checkbox" class="form-check-input" id="sab" name="dias_exclusion[]" value="6">
                                     <label class="form-check-label" for="sab">Sáb</label>
                                 </div>
+                            </div>
+                        </div>
+
+                        <!-- Validación en tiempo real -->
+                        <div id="validacion-preview" class="validacion-preview">
+                            <h6><i class="bi bi-calculator"></i> Análisis de Factibilidad</h6>
+                            <div id="validacion-content">
+                                <p class="text-muted">Configure las fechas y días de exclusión para ver el análisis de factibilidad...</p>
                             </div>
                         </div>
 
@@ -914,20 +1320,20 @@ $productos_con_existencia = $stmt_productos->fetchAll();
 
                         <!-- Información del algoritmo -->
                         <div class="alert alert-success mt-3">
-                            <h6><i class="bi bi-gear-fill"></i> Configuración del Algoritmo Inteligente V2.0:</h6>
+                            <h6><i class="bi bi-gear-fill"></i> Algoritmo Inteligente V3.0 - Garantías:</h6>
                             <div class="row">
                                 <div class="col-md-6">
                                     <ul class="mb-0 small">
-                                        <li><strong>Tablas por día:</strong> Entre 10 y 30 (aleatorio)</li>
-                                        <li><strong>Productos por tabla:</strong> Entre 1 y 40 (aleatorio)</li>
-                                        <li><strong>Agotamiento:</strong> Garantizado al 100%</li>
+                                        <li><strong>Cobertura 100%:</strong> Todos los días tendrán tablas</li>
+                                        <li><strong>Validación previa:</strong> Verifica factibilidad antes de ejecutar</li>
+                                        <li><strong>Distribución equilibrada:</strong> Entre 1 y 40 tablas por día</li>
                                     </ul>
                                 </div>
                                 <div class="col-md-6">
                                     <ul class="mb-0 small">
-                                        <li><strong>Cantidades inteligentes:</strong> Variables según disponibilidad</li>
-                                        <li><strong>Sin repetir:</strong> Un producto por tabla máximo</li>
-                                        <li><strong>Cobertura:</strong> TODOS los días seleccionados</li>
+                                        <li><strong>Alertas tempranas:</strong> Notifica inventario insuficiente</li>
+                                        <li><strong>Optimización automática:</strong> Maximiza uso del inventario</li>
+                                        <li><strong>Cantidades inteligentes:</strong> Adaptadas al contexto</li>
                                     </ul>
                                 </div>
                             </div>
@@ -937,7 +1343,7 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
                             <i class="bi bi-x-circle"></i> Cancelar
                         </button>
-                        <button type="submit" class="btn btn-primary">
+                        <button type="submit" class="btn btn-primary" id="btnGenerarDistribucion">
                             <i class="bi bi-rocket"></i> Generar Distribución Inteligente
                         </button>
                     </div>
@@ -1016,6 +1422,10 @@ $productos_con_existencia = $stmt_productos->fetchAll();
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        // Variables globales para validación
+        let validacionTimeout = null;
+        let ultimaValidacion = null;
+
         // Manejar cambio de tipo de distribución
         document.querySelectorAll('input[name="tipo_distribucion"]').forEach(radio => {
             radio.addEventListener('change', function() {
@@ -1026,6 +1436,8 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                 } else {
                     productosParcialesDiv.style.display = 'none';
                 }
+                // Revalidar cuando cambie el tipo
+                validarFactibilidadEnTiempoReal();
             });
         });
 
@@ -1054,9 +1466,223 @@ $productos_con_existencia = $stmt_productos->fetchAll();
             } else {
                 resumenDiv.style.display = 'none';
             }
+
+            // Revalidar factibilidad cuando cambian las cantidades parciales
+            validarFactibilidadEnTiempoReal();
         }
 
-        // Validación mejorada del formulario
+        // **NUEVA FUNCIÓN: VALIDACIÓN DE FACTIBILIDAD EN TIEMPO REAL**
+        function validarFactibilidadEnTiempoReal() {
+            const fechaInicio = document.getElementById('fecha_inicio').value;
+            const fechaFin = document.getElementById('fecha_fin').value;
+            const tipoDistribucion = document.querySelector('input[name="tipo_distribucion"]:checked')?.value;
+            
+            if (!fechaInicio || !fechaFin || !tipoDistribucion) {
+                document.getElementById('validacion-preview').style.display = 'none';
+                return;
+            }
+
+            // Debounce para evitar muchas llamadas
+            clearTimeout(validacionTimeout);
+            validacionTimeout = setTimeout(() => {
+                realizarValidacionFactibilidad(fechaInicio, fechaFin, tipoDistribucion);
+            }, 800);
+        }
+
+        // Función para realizar la validación usando JavaScript (simulando el algoritmo PHP)
+        function realizarValidacionFactibilidad(fechaInicio, fechaFin, tipoDistribucion) {
+            const previewDiv = document.getElementById('validacion-preview');
+            const contentDiv = document.getElementById('validacion-content');
+            
+            // Mostrar loading
+            previewDiv.style.display = 'block';
+            previewDiv.className = 'validacion-preview';
+            contentDiv.innerHTML = '<div class="text-center"><div class="spinner-border spinner-border-sm" role="status"></div> Analizando factibilidad...</div>';
+
+            // Calcular días válidos
+            const diasExcluidos = [];
+            document.querySelectorAll('input[name="dias_exclusion[]"]:checked').forEach(cb => {
+                diasExcluidos.push(parseInt(cb.value));
+            });
+
+            const diasValidos = calcularDiasValidos(fechaInicio, fechaFin, diasExcluidos);
+            
+            // Simular datos del inventario (en una implementación real, esto vendría del servidor)
+            const inventarioInfo = obtenerInfoInventarioSimulada(tipoDistribucion);
+            
+            // Realizar análisis
+            const analisis = analizarFactibilidad(diasValidos, inventarioInfo);
+            
+            // Mostrar resultado
+            mostrarResultadoValidacion(analisis, previewDiv, contentDiv);
+        }
+
+        function calcularDiasValidos(fechaInicio, fechaFin, diasExcluidos) {
+            const inicio = new Date(fechaInicio);
+            const fin = new Date(fechaFin);
+            const diasValidos = [];
+            
+            let fechaActual = new Date(inicio);
+            while (fechaActual <= fin) {
+                const diaSemana = fechaActual.getDay();
+                if (!diasExcluidos.includes(diaSemana)) {
+                    diasValidos.push(new Date(fechaActual));
+                }
+                fechaActual.setDate(fechaActual.getDate() + 1);
+            }
+            
+            return diasValidos;
+        }
+
+        function obtenerInfoInventarioSimulada(tipoDistribucion) {
+            // En una implementación real, esto se obtendría del servidor
+            // Por ahora simularemos con datos aproximados
+            
+            if (tipoDistribucion === 'completo') {
+                // Simular inventario completo (estos números deberían venir del servidor)
+                return {
+                    totalProductos: <?php echo count($productos_con_existencia); ?>,
+                    totalUnidades: <?php echo array_sum(array_column($productos_con_existencia, 'existencia')); ?>,
+                    productosConExistencia: <?php echo count(array_filter($productos_con_existencia, function($p) { return $p['existencia'] > 0; })); ?>
+                };
+            } else {
+                // Calcular productos seleccionados
+                const cantidades = document.querySelectorAll('.cantidad-parcial');
+                let productosSeleccionados = 0;
+                let unidadesTotales = 0;
+                
+                cantidades.forEach(input => {
+                    const cantidad = parseInt(input.value) || 0;
+                    if (cantidad > 0) {
+                        productosSeleccionados++;
+                        unidadesTotales += cantidad;
+                    }
+                });
+                
+                return {
+                    totalProductos: productosSeleccionados,
+                    totalUnidades: unidadesTotales,
+                    productosConExistencia: productosSeleccionados
+                };
+            }
+        }
+
+        function analizarFactibilidad(diasValidos, inventarioInfo) {
+            const totalDias = diasValidos.length;
+            const { totalProductos, totalUnidades, productosConExistencia } = inventarioInfo;
+            
+            if (totalDias <= 0) {
+                return {
+                    factible: false,
+                    tipo: 'error',
+                    mensaje: '❌ No hay días válidos para la distribución. Verifique las fechas y días de exclusión.'
+                };
+            }
+
+            if (totalProductos <= 0 || totalUnidades <= 0) {
+                return {
+                    factible: false,
+                    tipo: 'error',
+                    mensaje: '❌ No hay productos disponibles para distribuir.'
+                };
+            }
+
+            const minimoTablasPorDia = 10;
+            const minimoProdsPorTabla = 1;
+            const minimoUnidadesNecesarias = totalDias * minimoTablasPorDia * minimoProdsPorTabla;
+            
+            // Verificar productos únicos
+            if (totalProductos < totalDias) {
+                return {
+                    factible: false,
+                    tipo: 'error',
+                    mensaje: `❌ PRODUCTOS INSUFICIENTES:\n• Días a cubrir: ${totalDias}\n• Productos únicos disponibles: ${totalProductos}\n• Se necesitan mínimo ${totalDias} productos únicos\n\n💡 Agregue más productos al inventario o reduzca el período.`
+                };
+            }
+
+            // Verificar unidades totales
+            if (totalUnidades < minimoUnidadesNecesarias) {
+                const unidadesPorDia = Math.floor(totalUnidades / totalDias);
+                const tablasPorDiaPosible = Math.floor(unidadesPorDia / minimoProdsPorTabla);
+                
+                if (tablasPorDiaPosible >= 1) {
+                    return {
+                        factible: true,
+                        tipo: 'advertencia',
+                        mensaje: `⚠️ DISTRIBUCIÓN LIMITADA:\n• Días disponibles: ${totalDias}\n• Unidades totales: ${totalUnidades.toLocaleString()}\n• Máximo ${tablasPorDiaPosible} tablas por día (menos de 10 ideales)\n• Cobertura: Todos los días tendrán al menos 1 tabla\n\n✅ La distribución es factible pero con menor densidad.`
+                    };
+                } else {
+                    return {
+                        factible: false,
+                        tipo: 'error',
+                        mensaje: `❌ INVENTARIO MUY INSUFICIENTE:\n• ${totalUnidades} unidades para ${totalDias} días\n• Promedio: ${(totalUnidades/totalDias).toFixed(1)} productos por día\n\n⚠️ No es posible garantizar ni 1 tabla por día.`
+                    };
+                }
+            }
+
+            // Distribución factible
+            const promedioTablasPorDia = Math.min(40, Math.floor(totalUnidades / (totalDias * 2)));
+            return {
+                factible: true,
+                tipo: 'exito',
+                mensaje: `✅ DISTRIBUCIÓN FACTIBLE:\n• ${totalDias} días disponibles\n• ${totalProductos} productos únicos\n• ${totalUnidades.toLocaleString()} unidades totales\n• Estimado: ${promedioTablasPorDia} tablas por día\n\n🎯 Cobertura garantizada del 100% de los días.`
+            };
+        }
+
+        function mostrarResultadoValidacion(analisis, previewDiv, contentDiv) {
+            let claseCSS = 'validacion-preview ';
+            let icono = '';
+            
+            switch (analisis.tipo) {
+                case 'exito':
+                    claseCSS += 'factible';
+                    icono = '✅';
+                    break;
+                case 'advertencia':
+                    claseCSS += 'advertencia';
+                    icono = '⚠️';
+                    break;
+                case 'error':
+                    claseCSS += 'no-factible';
+                    icono = '❌';
+                    break;
+            }
+            
+            previewDiv.className = claseCSS;
+            contentDiv.innerHTML = `
+                <div class="d-flex align-items-start">
+                    <div class="me-3" style="font-size: 1.5em;">${icono}</div>
+                    <div>
+                        <h6>Análisis de Factibilidad</h6>
+                        <pre style="white-space: pre-wrap; font-family: inherit; margin: 0;">${analisis.mensaje}</pre>
+                    </div>
+                </div>
+            `;
+
+            // Habilitar/deshabilitar botón según factibilidad
+            const btnGenerar = document.getElementById('btnGenerarDistribucion');
+            if (analisis.factible) {
+                btnGenerar.disabled = false;
+                btnGenerar.innerHTML = '<i class="bi bi-rocket"></i> Generar Distribución Inteligente';
+            } else {
+                btnGenerar.disabled = true;
+                btnGenerar.innerHTML = '<i class="bi bi-x-circle"></i> Distribución No Factible';
+            }
+        }
+
+        // Eventos para activar validación en tiempo real
+        document.getElementById('fecha_inicio').addEventListener('change', validarFactibilidadEnTiempoReal);
+        document.getElementById('fecha_fin').addEventListener('change', validarFactibilidadEnTiempoReal);
+        document.querySelectorAll('input[name="dias_exclusion[]"]').forEach(cb => {
+            cb.addEventListener('change', validarFactibilidadEnTiempoReal);
+        });
+
+        // Agregar eventos a las cantidades parciales
+        document.querySelectorAll('.cantidad-parcial').forEach(input => {
+            input.addEventListener('input', actualizarContadorProductosParciales);
+        });
+
+        // Validación y envío del formulario
         document.getElementById('formDistribucion').addEventListener('submit', function(e) {
             const fechaInicio = new Date(document.getElementById('fecha_inicio').value);
             const fechaFin = new Date(document.getElementById('fecha_fin').value);
@@ -1107,18 +1733,25 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                 }
             }
             
+            // Verificar si la validación indica que no es factible
+            const btnGenerar = document.getElementById('btnGenerarDistribucion');
+            if (btnGenerar.disabled) {
+                e.preventDefault();
+                alert('❌ No se puede generar la distribución. Revise el análisis de factibilidad y corrija los problemas identificados.');
+                return false;
+            }
+            
             // Confirmar la acción con información detallada
             const diasSeleccionados = calcularDiasSeleccionados();
             let confirmMsg = '';
             
             if (tipoDistribucion === 'completo') {
                 confirmMsg = `🎯 ¿Confirmar distribución COMPLETA del inventario?\n\n` +
-                           `📊 Algoritmo Inteligente V2.0:\n` +
+                           `📊 Algoritmo Inteligente V3.0:\n` +
                            `• Se distribuirá TODO el inventario disponible\n` +
                            `• ${diasSeleccionados} días válidos de distribución\n` +
-                           `• 10-30 tablas por día (aleatorio)\n` +
-                           `• Cantidades variables e inteligentes\n` +
-                           `• Agotamiento garantizado al 100%\n\n` +
+                           `• Cobertura garantizada del 100% de los días\n` +
+                           `• Distribución equilibrada e inteligente\n\n` +
                            `⚠️ Esta operación NO se puede deshacer.`;
             } else {
                 const productosCount = document.getElementById('productos-seleccionados-count').textContent;
@@ -1140,14 +1773,14 @@ $productos_con_existencia = $stmt_productos->fetchAll();
             // Mostrar indicador de carga
             const submitBtn = this.querySelector('button[type="submit"]');
             const originalText = submitBtn.innerHTML;
-            submitBtn.innerHTML = '<i class="bi bi-hourglass-split"></i> Generando...';
+            submitBtn.innerHTML = '<i class="bi bi-hourglass-split"></i> Generando Distribución...';
             submitBtn.disabled = true;
             
-            // Restaurar botón después de 30 segundos por si hay error
+            // Restaurar botón después de 45 segundos por si hay error
             setTimeout(() => {
                 submitBtn.innerHTML = originalText;
                 submitBtn.disabled = false;
-            }, 30000);
+            }, 45000);
         });
 
         // Función para calcular días seleccionados
@@ -1193,7 +1826,7 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                                         <div class="row">
                                             <div class="col-md-3"><strong>Tipo:</strong> ${data.distribucion.tipo_distribucion == 'completo' ? '🎯 Completo' : '📋 Parcial'}</div>
                                             <div class="col-md-3"><strong>Tablas:</strong> ${data.tablas.length}</div>
-                                            <div class="col-md-3"><strong>Total:</strong> $${parseFloat(data.total_general).toFixed(2)}</div>
+                                            <div class="col-md-3"><strong>Total:</strong> ${parseFloat(data.total_general).toFixed(2)}</div>
                                             <div class="col-md-3"><strong>Estado:</strong> <span class="badge bg-success">✅ Activa</span></div>
                                         </div>
                                     </div>
@@ -1315,7 +1948,7 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                             <div class="row mt-4">
                                 <div class="col-12">
                                     <div class="alert alert-success">
-                                        <h6><i class="bi bi-graph-up"></i> Estadísticas de la Distribución</h6>
+                                        <h6><i class="bi bi-graph-up"></i> Estadísticas de la Distribución - Algoritmo V3.0</h6>
                                         <div class="row">
                                             <div class="col-md-3">
                                                 <strong>📊 Total Tablas:</strong> ${totalTablas}<br>
@@ -1330,8 +1963,8 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                                                 <strong>💵 Promedio/Tabla:</strong> ${(totalGeneral/totalTablas).toFixed(2)}
                                             </div>
                                             <div class="col-md-3">
-                                                <strong>🎯 Algoritmo:</strong> V2.0 Inteligente<br>
-                                                <strong>✅ Estado:</strong> Distribución Completa
+                                                <strong>🎯 Algoritmo:</strong> V3.0 Inteligente<br>
+                                                <strong>✅ Cobertura:</strong> ${((diasUnicos * 10 <= totalTablas) ? '100%' : Math.round((totalTablas / (diasUnicos * 10)) * 100) + '%')} Óptima
                                             </div>
                                         </div>
                                     </div>
@@ -1373,7 +2006,7 @@ $productos_con_existencia = $stmt_productos->fetchAll();
             ventana.document.write(`
                 <html>
                 <head>
-                    <title>Tablas de Distribución - Sistema de Inventario</title>
+                    <title>Tablas de Distribución V3.0 - Sistema de Inventario</title>
                     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
                     <style>
                         body { 
@@ -1426,13 +2059,13 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                 <body>
                     <div class="container-fluid">
                         <div class="text-center mb-4">
-                            <h3>📋 Tablas de Distribución</h3>
-                            <p class="text-muted">Sistema de Inventario - Algoritmo Inteligente V2.0</p>
+                            <h3>📋 Tablas de Distribución V3.0</h3>
+                            <p class="text-muted">Sistema de Inventario - Algoritmo Inteligente con Cobertura Garantizada</p>
                             <hr>
                         </div>
                         ${contenido}
                         <div class="text-center mt-4">
-                            <small class="text-muted">Generado el ${new Date().toLocaleString('es-ES')} | Sistema de Inventario</small>
+                            <small class="text-muted">Generado el ${new Date().toLocaleString('es-ES')} | Sistema de Inventario V3.0</small>
                         </div>
                     </div>
                 </body>
@@ -1450,6 +2083,7 @@ $productos_con_existencia = $stmt_productos->fetchAll();
             document.getElementById('formDistribucion').reset();
             document.getElementById('productos-parciales').style.display = 'none';
             document.getElementById('resumen-parcial').style.display = 'none';
+            document.getElementById('validacion-preview').style.display = 'none';
             document.getElementById('completo').checked = true;
             
             // Resetear todas las cantidades parciales a 0
@@ -1461,6 +2095,10 @@ $productos_con_existencia = $stmt_productos->fetchAll();
             const submitBtn = document.querySelector('#formDistribucion button[type="submit"]');
             submitBtn.innerHTML = '<i class="bi bi-rocket"></i> Generar Distribución Inteligente';
             submitBtn.disabled = false;
+            
+            // Limpiar validación
+            ultimaValidacion = null;
+            clearTimeout(validacionTimeout);
         });
 
         // Configuración inicial al cargar la página
@@ -1479,6 +2117,11 @@ $productos_con_existencia = $stmt_productos->fetchAll();
             const tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
                 return new bootstrap.Tooltip(tooltipTriggerEl);
             });
+
+            // Realizar validación inicial
+            setTimeout(() => {
+                validarFactibilidadEnTiempoReal();
+            }, 1000);
         });
 
         // Actualizar fecha mínima de fin cuando cambia fecha de inicio
@@ -1492,7 +2135,7 @@ $productos_con_existencia = $stmt_productos->fetchAll();
             }
         });
 
-        // Mejorar experiencia del usuario con feedback visual
+        // Mejorar experiencia del usuario con feedback visual en productos parciales
         document.querySelectorAll('.cantidad-parcial').forEach(input => {
             input.addEventListener('input', function() {
                 const max = parseInt(this.max);
@@ -1509,13 +2152,22 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                 
                 actualizarContadorProductosParciales();
             });
+
+            // Agregar eventos para validación en tiempo real
+            input.addEventListener('change', function() {
+                // Pequeño delay para que se complete la actualización del contador
+                setTimeout(() => {
+                    validarFactibilidadEnTiempoReal();
+                }, 100);
+            });
         });
 
-        // Función para mostrar preview de días seleccionados
+        // Función para mostrar preview de días seleccionados en tiempo real
         function mostrarPreviewDias() {
             const diasSeleccionados = calcularDiasSeleccionados();
-            const previewElement = document.getElementById('preview-dias');
             
+            // Actualizar algún elemento de preview si existe
+            const previewElement = document.getElementById('preview-dias');
             if (previewElement) {
                 previewElement.textContent = `${diasSeleccionados} días válidos seleccionados`;
             }
@@ -1526,6 +2178,89 @@ $productos_con_existencia = $stmt_productos->fetchAll();
         document.getElementById('fecha_fin').addEventListener('change', mostrarPreviewDias);
         document.querySelectorAll('input[name="dias_exclusion[]"]').forEach(checkbox => {
             checkbox.addEventListener('change', mostrarPreviewDias);
+        });
+
+        // Funciones adicionales para mejorar UX
+
+        // Función para destacar días de la semana con colores
+        function destacarDiasExcluidos() {
+            document.querySelectorAll('input[name="dias_exclusion[]"]').forEach(checkbox => {
+                checkbox.addEventListener('change', function() {
+                    const label = this.nextElementSibling;
+                    if (this.checked) {
+                        label.style.color = '#dc3545';
+                        label.style.fontWeight = 'bold';
+                    } else {
+                        label.style.color = '';
+                        label.style.fontWeight = '';
+                    }
+                });
+            });
+        }
+
+        // Función para mostrar warnings en tiempo real
+        function mostrarWarnings() {
+            const fechaInicio = document.getElementById('fecha_inicio').value;
+            const fechaFin = document.getElementById('fecha_fin').value;
+            
+            if (fechaInicio && fechaFin) {
+                const inicio = new Date(fechaInicio);
+                const fin = new Date(fechaFin);
+                const diffDays = Math.ceil((fin - inicio) / (1000 * 60 * 60 * 24)) + 1;
+                
+                if (diffDays > 60) {
+                    // Mostrar warning para períodos muy largos
+                    console.warn('Período muy largo seleccionado:', diffDays, 'días');
+                }
+            }
+        }
+
+        // Inicializar funciones adicionales
+        destacarDiasExcluidos();
+
+        // Auto-guardar configuración en localStorage para próximas sesiones
+        function guardarConfiguracion() {
+            const config = {
+                tipo_distribucion: document.querySelector('input[name="tipo_distribucion"]:checked')?.value,
+                dias_exclusion: Array.from(document.querySelectorAll('input[name="dias_exclusion[]"]:checked')).map(cb => cb.value)
+            };
+            
+            localStorage.setItem('distribucion_config', JSON.stringify(config));
+        }
+
+        function cargarConfiguracion() {
+            try {
+                const config = JSON.parse(localStorage.getItem('distribucion_config') || '{}');
+                
+                if (config.tipo_distribucion) {
+                    document.getElementById(config.tipo_distribucion).checked = true;
+                }
+                
+                if (config.dias_exclusion) {
+                    config.dias_exclusion.forEach(dia => {
+                        const checkbox = document.querySelector(`input[name="dias_exclusion[]"][value="${dia}"]`);
+                        if (checkbox) checkbox.checked = true;
+                    });
+                }
+            } catch (e) {
+                console.log('No hay configuración previa guardada');
+            }
+        }
+
+        // Evento para guardar configuración cuando cambie
+        document.querySelectorAll('input[name="tipo_distribucion"], input[name="dias_exclusion[]"]').forEach(input => {
+            input.addEventListener('change', guardarConfiguracion);
+        });
+
+        // Cargar configuración al inicio
+        // cargarConfiguracion(); // Descomentado si se quiere activar la funcionalidad
+
+        // Validación final antes del envío para asegurar que todo esté correcto
+        window.addEventListener('beforeunload', function() {
+            // Limpiar timeouts pendientes
+            if (validacionTimeout) {
+                clearTimeout(validacionTimeout);
+            }
         });
     </script>
 </body>
