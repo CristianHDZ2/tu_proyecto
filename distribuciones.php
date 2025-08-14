@@ -241,7 +241,6 @@ function validarDistribucionFactible($db, $fecha_inicio, $fecha_fin, $dias_exclu
         ];
     }
 }
-
 // **FUNCIÓN PARA CALCULAR FECHAS VÁLIDAS**
 function calcularFechasValidas($fecha_inicio, $fecha_fin, $dias_exclusion) {
     $fechas_validas = [];
@@ -313,6 +312,7 @@ function obtenerUnidadesParaDistribucion($db, $tipo_distribucion, $productos_sel
         'total_unidades' => $total_unidades // TOTAL DE UNIDADES/EXISTENCIAS
     ];
 }
+
 // **ALGORITMO PRINCIPAL CORREGIDO - BASADO EN UNIDADES TOTALES**
 function generarTablasDistribucionCorregido($db, $distribucion_id, $fecha_inicio, $fecha_fin, $dias_exclusion_json, $tipo_distribucion, $productos_seleccionados_json) {
     try {
@@ -703,7 +703,380 @@ $stmt_productos = $db->prepare("SELECT id, proveedor, descripcion, existencia, p
 $stmt_productos->execute();
 $productos_con_existencia = $stmt_productos->fetchAll();
 ?>
-<div class="col-md-6">
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestión de Distribuciones - Sistema de Inventario</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        .sidebar {
+            height: 100vh;
+            background-color: #343a40;
+        }
+        .sidebar .nav-link {
+            color: #adb5bd;
+        }
+        .sidebar .nav-link:hover {
+            color: #fff;
+            background-color: #495057;
+        }
+        .sidebar .nav-link.active {
+            color: #fff;
+            background-color: #0d6efd;
+        }
+        .main-content {
+            margin-left: 0;
+        }
+        @media (min-width: 768px) {
+            .main-content {
+                margin-left: 250px;
+            }
+        }
+        .distribution-card {
+            transition: transform 0.2s;
+        }
+        .distribution-card:hover {
+            transform: translateY(-2px);
+        }
+        .validacion-preview {
+            border: 2px solid;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 15px 0;
+            background-color: #f8f9fa;
+        }
+        .validacion-preview.factible {
+            border-color: #28a745;
+            background-color: #d4edda;
+        }
+        .validacion-preview.advertencia {
+            border-color: #ffc107;
+            background-color: #fff3cd;
+        }
+        .validacion-preview.no-factible {
+            border-color: #dc3545;
+            background-color: #f8d7da;
+        }
+        .producto-item {
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            padding: 10px;
+            margin-bottom: 8px;
+            background-color: #fefefe;
+        }
+        .distribucion-estado {
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+        .table-sm td {
+            padding: 0.5rem 0.75rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <div class="row">
+            <!-- Sidebar -->
+            <nav class="col-md-3 col-lg-2 d-md-block sidebar collapse">
+                <div class="position-sticky pt-3">
+                    <div class="text-center mb-4">
+                        <h4 class="text-white">Inventario</h4>
+                    </div>
+                    <ul class="nav flex-column">
+                        <li class="nav-item">
+                            <a class="nav-link" href="index.php">
+                                <i class="bi bi-house-door"></i> Dashboard
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="productos.php">
+                                <i class="bi bi-box"></i> Productos
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="inventario.php">
+                                <i class="bi bi-clipboard-data"></i> Inventario
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="ingresos.php">
+                                <i class="bi bi-arrow-down-circle"></i> Ingresos
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link active" href="distribuciones.php">
+                                <i class="bi bi-arrow-up-circle"></i> Distribuciones
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="reportes.php">
+                                <i class="bi bi-file-earmark-bar-graph"></i> Reportes
+                            </a>
+                        </li>
+                    </ul>
+                </div>
+            </nav>
+
+            <!-- Main content -->
+            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 main-content">
+                <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+                    <h1 class="h2">
+                        <i class="bi bi-arrow-up-circle text-primary"></i> Gestión de Distribuciones
+                    </h1>
+                    <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#modalDistribucion">
+                        <i class="bi bi-plus-lg"></i> Nueva Distribución
+                    </button>
+                </div>
+
+                <!-- Mensajes -->
+                <?php if (!empty($mensaje)): ?>
+                    <div class="alert alert-<?php echo $tipo_mensaje; ?> alert-dismissible fade show" role="alert">
+                        <pre style="white-space: pre-wrap; margin: 0;"><?php echo htmlspecialchars($mensaje); ?></pre>
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                <?php endif; ?>
+
+                <!-- Filtros -->
+                <div class="card mb-4">
+                    <div class="card-body">
+                        <form method="GET" class="row g-3">
+                            <div class="col-md-4">
+                                <label for="estado" class="form-label">Estado</label>
+                                <select class="form-select" id="estado" name="estado">
+                                    <option value="activo" <?php echo $estado_filter == 'activo' ? 'selected' : ''; ?>>
+                                        <i class="bi bi-check-circle"></i> Activas
+                                    </option>
+                                    <option value="eliminado" <?php echo $estado_filter == 'eliminado' ? 'selected' : ''; ?>>
+                                        <i class="bi bi-trash"></i> Eliminadas
+                                    </option>
+                                </select>
+                            </div>
+                            <div class="col-md-8 d-flex align-items-end">
+                                <button type="submit" class="btn btn-outline-primary me-2">
+                                    <i class="bi bi-search"></i> Filtrar
+                                </button>
+                                <a href="distribuciones.php" class="btn btn-outline-secondary">
+                                    <i class="bi bi-x-lg"></i> Limpiar
+                                </a>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Lista de distribuciones -->
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">
+                            <i class="bi bi-list-ul"></i> Lista de Distribuciones (<?php echo $total_distribuciones; ?> total)
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <?php if (count($distribuciones) > 0): ?>
+                            <div class="row">
+                                <?php foreach ($distribuciones as $distribucion): ?>
+                                    <div class="col-md-6 col-lg-4 mb-4">
+                                        <div class="card distribution-card h-100">
+                                            <div class="card-header">
+                                                <div class="d-flex justify-content-between align-items-center">
+                                                    <h6 class="mb-0">
+                                                        <i class="bi bi-calendar-week"></i> 
+                                                        <?php echo ucfirst($distribucion['tipo_distribucion']); ?>
+                                                    </h6>
+                                                    <span class="badge <?php echo $distribucion['estado'] == 'activo' ? 'bg-success' : 'bg-secondary'; ?> distribucion-estado">
+                                                        <?php echo $distribucion['estado'] == 'activo' ? 'Activa' : 'Eliminada'; ?>
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="mb-3">
+                                                    <div class="row">
+                                                        <div class="col-6">
+                                                            <small class="text-muted">Inicio:</small><br>
+                                                            <strong><?php echo date('d/m/Y', strtotime($distribucion['fecha_inicio'])); ?></strong>
+                                                        </div>
+                                                        <div class="col-6">
+                                                            <small class="text-muted">Fin:</small><br>
+                                                            <strong><?php echo date('d/m/Y', strtotime($distribucion['fecha_fin'])); ?></strong>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                
+                                                <div class="row mb-3">
+                                                    <div class="col-6">
+                                                        <div class="text-center">
+                                                            <div class="h5 text-primary mb-0"><?php echo $distribucion['total_tablas'] ?: 0; ?></div>
+                                                            <small class="text-muted">Tablas</small>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-6">
+                                                        <div class="text-center">
+                                                            <div class="h5 text-success mb-0">$<?php echo number_format($distribucion['total_distribucion'] ?: 0, 2); ?></div>
+                                                            <small class="text-muted">Total</small>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <?php 
+                                                $dias_exclusion = json_decode($distribucion['dias_exclusion'], true) ?: [];
+                                                if (!empty($dias_exclusion)): 
+                                                ?>
+                                                    <div class="mb-3">
+                                                        <small class="text-muted">Días excluidos:</small><br>
+                                                        <?php 
+                                                        $dias_nombres = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+                                                        $excluidos = [];
+                                                        foreach ($dias_exclusion as $dia) {
+                                                            $excluidos[] = $dias_nombres[$dia];
+                                                        }
+                                                        echo '<span class="badge bg-warning text-dark">' . implode(', ', $excluidos) . '</span>';
+                                                        ?>
+                                                    </div>
+                                                <?php endif; ?>
+
+                                                <small class="text-muted">
+                                                    <i class="bi bi-clock"></i> Creada: <?php echo date('d/m/Y H:i', strtotime($distribucion['fecha_creacion'])); ?>
+                                                </small>
+                                            </div>
+                                            <div class="card-footer">
+                                                <div class="btn-group w-100" role="group">
+                                                    <?php if ($distribucion['estado'] == 'activo'): ?>
+                                                        <button type="button" class="btn btn-outline-info btn-sm" 
+                                                                onclick="verTablas(<?php echo $distribucion['id']; ?>)" 
+                                                                title="Ver tablas de distribución">
+                                                            <i class="bi bi-table"></i> Ver Tablas
+                                                        </button>
+                                                        <button type="button" class="btn btn-outline-danger btn-sm" 
+                                                                onclick="eliminarDistribucion(<?php echo $distribucion['id']; ?>)" 
+                                                                title="Eliminar distribución">
+                                                            <i class="bi bi-trash"></i>
+                                                        </button>
+                                                    <?php else: ?>
+                                                        <button type="button" class="btn btn-outline-secondary btn-sm" disabled>
+                                                            <i class="bi bi-archive"></i> Eliminada
+                                                        </button>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+
+                            <!-- Paginación -->
+                            <?php if ($total_pages > 1): ?>
+                                <nav aria-label="Navegación de distribuciones">
+                                    <ul class="pagination justify-content-center">
+                                        <li class="page-item <?php echo $page <= 1 ? 'disabled' : ''; ?>">
+                                            <a class="page-link" href="?page=<?php echo $page - 1; ?>&estado=<?php echo urlencode($estado_filter); ?>">Anterior</a>
+                                        </li>
+                                        
+                                        <?php for ($i = max(1, $page - 2); $i <= min($total_pages, $page + 2); $i++): ?>
+                                            <li class="page-item <?php echo $i == $page ? 'active' : ''; ?>">
+                                                <a class="page-link" href="?page=<?php echo $i; ?>&estado=<?php echo urlencode($estado_filter); ?>"><?php echo $i; ?></a>
+                                            </li>
+                                        <?php endfor; ?>
+                                        
+                                        <li class="page-item <?php echo $page >= $total_pages ? 'disabled' : ''; ?>">
+                                            <a class="page-link" href="?page=<?php echo $page + 1; ?>&estado=<?php echo urlencode($estado_filter); ?>">Siguiente</a>
+                                        </li>
+                                    </ul>
+                                </nav>
+                            <?php endif; ?>
+                        <?php else: ?>
+                            <div class="text-center py-5">
+                                <i class="bi bi-calendar-x display-1 text-muted"></i>
+                                <h4 class="mt-3">No hay distribuciones</h4>
+                                <p class="text-muted">No se encontraron distribuciones con los criterios especificados.</p>
+                                <?php if ($estado_filter == 'activo'): ?>
+                                    <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#modalDistribucion">
+                                        <i class="bi bi-plus-lg"></i> Crear Primera Distribución
+                                    </button>
+                                <?php endif; ?>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- Modal para nueva distribución -->
+    <div class="modal fade" id="modalDistribucion" tabindex="-1" aria-labelledby="modalDistribucionLabel" aria-hidden="true">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="modalDistribucionLabel">
+                        <i class="bi bi-calendar-plus"></i> Nueva Distribución de Unidades
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <form id="formDistribucion" method="POST">
+                    <div class="modal-body">
+                        <input type="hidden" name="accion" value="crear_distribucion">
+                        
+                        <!-- Configuración de fechas -->
+                        <h6><i class="bi bi-calendar-range"></i> Período de Distribución</h6>
+                        <div class="row mb-4">
+                            <div class="col-md-6">
+                                <label for="fecha_inicio" class="form-label">Fecha de Inicio <span class="text-danger">*</span></label>
+                                <input type="date" class="form-control" id="fecha_inicio" name="fecha_inicio" required>
+                            </div>
+                            <div class="col-md-6">
+                                <label for="fecha_fin" class="form-label">Fecha de Fin <span class="text-danger">*</span></label>
+                                <input type="date" class="form-control" id="fecha_fin" name="fecha_fin" required>
+                            </div>
+                        </div>
+
+                        <!-- Días de exclusión -->
+                        <div class="mb-4">
+                            <h6><i class="bi bi-calendar-x"></i> Días de la Semana a Excluir (Opcional)</h6>
+                            <div class="row">
+                                <?php 
+                                $dias_semana = [
+                                    0 => 'Domingo', 1 => 'Lunes', 2 => 'Martes', 3 => 'Miércoles', 
+                                    4 => 'Jueves', 5 => 'Viernes', 6 => 'Sábado'
+                                ];
+                                foreach ($dias_semana as $num => $nombre): 
+                                ?>
+                                    <div class="col-md-3 col-6">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" name="dias_exclusion[]" 
+                                                   value="<?php echo $num; ?>" id="dia<?php echo $num; ?>">
+                                            <label class="form-check-label" for="dia<?php echo $num; ?>">
+                                                <?php echo $nombre; ?>
+                                            </label>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                            </div>
+                            <small class="text-muted">
+                                <i class="bi bi-info-circle"></i> Marque los días en los que NO desea generar tablas de distribución.
+                            </small>
+                        </div>
+
+                        <!-- Vista previa de validación -->
+                        <div id="validacion-preview" style="display: none;">
+                            <div id="validacion-content"></div>
+                        </div>
+
+                        <!-- Tipo de distribución -->
+                        <div class="mb-4">
+                            <h6><i class="bi bi-gear"></i> Tipo de Distribución de Unidades</h6>
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="radio" name="tipo_distribucion" id="completo" value="completo" checked>
+                                        <label class="form-check-label" for="completo">
+                                            <strong>📦 Todas las Unidades</strong><br>
+                                            <small class="text-muted">Distribuir TODAS las unidades disponibles en el inventario</small>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
                                     <div class="form-check">
                                         <input class="form-check-input" type="radio" name="tipo_distribucion" id="parcial" value="parcial">
                                         <label class="form-check-label" for="parcial">
@@ -1251,8 +1624,7 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
-                        // Mostrar tablas cargadas
-                        document.getElementById('tablasContent').innerHTML = "Tablas de distribución cargadas correctamente...";
+                        mostrarTablasDistribucion(data);
                     } else {
                         document.getElementById('tablasContent').innerHTML = `
                             <div class="alert alert-danger">
@@ -1269,6 +1641,127 @@ $productos_con_existencia = $stmt_productos->fetchAll();
                         </div>
                     `;
                 });
+        }
+
+        // Función para mostrar las tablas de distribución
+        function mostrarTablasDistribucion(data) {
+            const { distribucion, tablas, total_general } = data;
+            
+            let html = `
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h6 class="mb-0">
+                            <i class="bi bi-info-circle"></i> Información de la Distribución
+                        </h6>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-4">
+                                <strong>Tipo:</strong> ${distribucion.tipo_distribucion.charAt(0).toUpperCase() + distribucion.tipo_distribucion.slice(1)}<br>
+                                <strong>Período:</strong> ${distribucion.fecha_inicio} al ${distribucion.fecha_fin}
+                            </div>
+                            <div class="col-md-4">
+                                <strong>Total Tablas:</strong> ${tablas.length}<br>
+                                <strong>Total Distribución:</strong> ${total_general.toFixed(2)}
+                            </div>
+                            <div class="col-md-4">
+                                <strong>Estado:</strong> <span class="badge bg-success">Activa</span><br>
+                                <strong>Creada:</strong> ${new Date(distribucion.fecha_creacion).toLocaleString()}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            if (tablas.length > 0) {
+                // Agrupar tablas por fecha
+                const tablasPorFecha = {};
+                tablas.forEach(tabla => {
+                    const fecha = tabla.fecha_tabla;
+                    if (!tablasPorFecha[fecha]) {
+                        tablasPorFecha[fecha] = [];
+                    }
+                    tablasPorFecha[fecha].push(tabla);
+                });
+
+                // Mostrar tablas agrupadas por fecha
+                Object.keys(tablasPorFecha).sort().forEach(fecha => {
+                    const tablasDelDia = tablasPorFecha[fecha];
+                    const totalDia = tablasDelDia.reduce((sum, tabla) => sum + parseFloat(tabla.total_tabla), 0);
+                    
+                    html += `
+                        <div class="card mb-3">
+                            <div class="card-header">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <h6 class="mb-0">
+                                        <i class="bi bi-calendar-day"></i> ${tablasDelDia[0].dia_semana} ${tablasDelDia[0].fecha_tabla_formato}
+                                    </h6>
+                                    <span class="badge bg-primary">${tablasDelDia.length} tablas - ${totalDia.toFixed(2)}</span>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="row">
+                    `;
+                    
+                    tablasDelDia.forEach(tabla => {
+                        html += `
+                            <div class="col-md-6 col-lg-4 mb-3">
+                                <div class="border rounded p-3 h-100">
+                                    <div class="d-flex justify-content-between align-items-center mb-2">
+                                        <h6 class="mb-0">Tabla #${tabla.numero_tabla}</h6>
+                                        <span class="badge bg-success">${parseFloat(tabla.total_tabla).toFixed(2)}</span>
+                                    </div>
+                                    <div class="table-responsive">
+                                        <table class="table table-sm">
+                                            <thead>
+                                                <tr>
+                                                    <th>Producto</th>
+                                                    <th>Cant.</th>
+                                                    <th>Precio</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                        `;
+                        
+                        tabla.detalles.forEach(detalle => {
+                            html += `
+                                <tr>
+                                    <td>
+                                        <small>
+                                            <strong>${detalle.descripcion.substring(0, 30)}${detalle.descripcion.length > 30 ? '...' : ''}</strong><br>
+                                            <span class="text-muted">${detalle.proveedor}</span>
+                                        </small>
+                                    </td>
+                                    <td>${detalle.cantidad}</td>
+                                    <td>${parseFloat(detalle.precio_venta).toFixed(2)}</td>
+                                </tr>
+                            `;
+                        });
+                        
+                        html += `
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    
+                    html += `
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                });
+            } else {
+                html += `
+                    <div class="alert alert-info">
+                        <i class="bi bi-info-circle"></i> No hay tablas generadas para esta distribución.
+                    </div>
+                `;
+            }
+
+            document.getElementById('tablasContent').innerHTML = html;
         }
 
         // Eliminar distribución
@@ -1411,15 +1904,191 @@ $productos_con_existencia = $stmt_productos->fetchAll();
 • Alertas tempranas de problemas`);
         }
 
-        // Agregar botón de ayuda si se necesita
-        const helpButton = document.createElement('button');
-        helpButton.type = 'button';
-        helpButton.className = 'btn btn-outline-info btn-sm';
-        helpButton.innerHTML = '<i class="bi bi-question-circle"></i> Ayuda';
-        helpButton.onclick = mostrarAyudaUnidades;
-        
-        // Agregar el botón de ayuda al header del modal si se desea
-        // document.querySelector('.modal-header').appendChild(helpButton);
+        // Agregar estilos adicionales para mejorar la experiencia visual
+        const style = document.createElement('style');
+        style.textContent = `
+            .distribution-card:hover {
+                box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            }
+            .cantidad-parcial.is-valid {
+                border-color: #28a745;
+            }
+            .cantidad-parcial.is-invalid {
+                border-color: #dc3545;
+                animation: shake 0.5s;
+            }
+            @keyframes shake {
+                0%, 100% { transform: translateX(0); }
+                25% { transform: translateX(-5px); }
+                75% { transform: translateX(5px); }
+            }
+            .producto-item:hover {
+                background-color: #f8f9fa;
+                border-color: #007bff;
+            }
+            .validacion-preview {
+                animation: fadeIn 0.3s ease-in;
+            }
+            @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(-10px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            @media print {
+                .modal-footer, .btn, .no-print {
+                    display: none !important;
+                }
+                .modal-dialog {
+                    max-width: 100% !important;
+                    margin: 0 !important;
+                }
+                .modal-content {
+                    border: none !important;
+                    box-shadow: none !important;
+                }
+            }
+        `;
+        document.head.appendChild(style);
+
+        // Función para búsqueda rápida en productos parciales
+        function agregarBusquedaProductos() {
+            const busquedaInput = document.createElement('input');
+            busquedaInput.type = 'text';
+            busquedaInput.className = 'form-control mb-3';
+            busquedaInput.placeholder = '🔍 Buscar productos...';
+            busquedaInput.addEventListener('input', function() {
+                const termino = this.value.toLowerCase();
+                document.querySelectorAll('.producto-item').forEach(item => {
+                    const texto = item.textContent.toLowerCase();
+                    const contenedor = item.closest('.col-md-6');
+                    if (texto.includes(termino)) {
+                        contenedor.style.display = 'block';
+                    } else {
+                        contenedor.style.display = 'none';
+                    }
+                });
+            });
+
+            // Insertar el campo de búsqueda
+            const productosDiv = document.getElementById('productos-parciales');
+            const alertaInfo = productosDiv.querySelector('.alert-info');
+            alertaInfo.insertAdjacentElement('afterend', busquedaInput);
+        }
+
+        // Agregar funcionalidad de búsqueda cuando se muestre el modal
+        document.getElementById('modalDistribucion').addEventListener('shown.bs.modal', function() {
+            if (!document.querySelector('#productos-parciales input[placeholder*="Buscar"]')) {
+                agregarBusquedaProductos();
+            }
+        });
+
+        // Función para seleccionar/deseleccionar todos los productos de un proveedor
+        function agregarFuncionalidadProveedor() {
+            document.querySelectorAll('h6.text-primary').forEach(header => {
+                if (header.textContent.includes('bi-building')) {
+                    const btnToggle = document.createElement('button');
+                    btnToggle.type = 'button';
+                    btnToggle.className = 'btn btn-outline-primary btn-sm ms-2';
+                    btnToggle.innerHTML = '<i class="bi bi-check-all"></i> Seleccionar Todos';
+                    
+                    btnToggle.addEventListener('click', function() {
+                        const proveedorDiv = header.parentElement;
+                        const inputs = proveedorDiv.querySelectorAll('.cantidad-parcial');
+                        const todosMarcados = Array.from(inputs).every(input => parseInt(input.value) > 0);
+                        
+                        inputs.forEach(input => {
+                            if (todosMarcados) {
+                                input.value = 0;
+                            } else {
+                                const max = parseInt(input.max);
+                                input.value = Math.min(max, 5); // Cantidad por defecto
+                            }
+                        });
+                        
+                        btnToggle.innerHTML = todosMarcados ? 
+                            '<i class="bi bi-check-all"></i> Seleccionar Todos' : 
+                            '<i class="bi bi-x-circle"></i> Deseleccionar Todos';
+                        
+                        actualizarContadorProductosParciales();
+                    });
+                    
+                    header.appendChild(btnToggle);
+                }
+            });
+        }
+
+        // Inicializar funcionalidades adicionales cuando se abra el modal
+        document.getElementById('modalDistribucion').addEventListener('shown.bs.modal', function() {
+            if (!document.querySelector('.btn-outline-primary[onclick*="Seleccionar"]')) {
+                agregarFuncionalidadProveedor();
+            }
+        });
+
+        // Mostrar tooltip de ayuda en validación
+        document.addEventListener('DOMContentLoaded', function() {
+            // Agregar tooltips a elementos importantes
+            const tooltips = [
+                { selector: '#fecha_inicio', title: 'Fecha en que comenzará la distribución' },
+                { selector: '#fecha_fin', title: 'Fecha en que terminará la distribución' },
+                { selector: '#completo', title: 'Distribuir todas las unidades disponibles en inventario' },
+                { selector: '#parcial', title: 'Seleccionar productos específicos y cantidades exactas' }
+            ];
+
+            tooltips.forEach(({selector, title}) => {
+                const element = document.querySelector(selector);
+                if (element) {
+                    element.setAttribute('data-bs-toggle', 'tooltip');
+                    element.setAttribute('data-bs-placement', 'top');
+                    element.setAttribute('title', title);
+                }
+            });
+
+            // Inicializar tooltips de Bootstrap
+            const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+            tooltipTriggerList.map(function (tooltipTriggerEl) {
+                return new bootstrap.Tooltip(tooltipTriggerEl);
+            });
+        });
+
+        // Función para exportar configuración de distribución
+        function exportarConfiguracion() {
+            const config = {
+                fecha_inicio: document.getElementById('fecha_inicio').value,
+                fecha_fin: document.getElementById('fecha_fin').value,
+                tipo_distribucion: document.querySelector('input[name="tipo_distribucion"]:checked')?.value,
+                dias_exclusion: Array.from(document.querySelectorAll('input[name="dias_exclusion[]"]:checked')).map(cb => cb.value),
+                productos_parciales: []
+            };
+
+            if (config.tipo_distribucion === 'parcial') {
+                const cantidades = document.querySelectorAll('.cantidad-parcial');
+                cantidades.forEach((input, index) => {
+                    const cantidad = parseInt(input.value) || 0;
+                    if (cantidad > 0) {
+                        config.productos_parciales.push({
+                            producto_id: input.closest('.producto-item').querySelector('input[name="productos_parciales[]"]').value,
+                            cantidad: cantidad
+                        });
+                    }
+                });
+            }
+
+            const dataStr = JSON.stringify(config, null, 2);
+            const dataBlob = new Blob([dataStr], {type: 'application/json'});
+            const url = URL.createObjectURL(dataBlob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `configuracion_distribucion_${new Date().toISOString().split('T')[0]}.json`;
+            link.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // Agregar botón de exportar configuración si se necesita
+        // Esto se puede activar agregando un botón en el modal
+
+        console.log('Sistema de Distribuciones V3.0 - Cargado correctamente');
+        console.log('✅ Algoritmo corregido basado en unidades totales');
+        console.log('✅ Validación en tiempo real implementada');
+        console.log('✅ Interfaz completa con diseño responsivo');
     </script>
 </body>
 </html>
