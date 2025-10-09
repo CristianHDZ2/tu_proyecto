@@ -13,10 +13,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         switch ($_POST['accion']) {
             case 'crear':
                 try {
-                    $stmt = $db->prepare("INSERT INTO productos (proveedor, descripcion, precio_venta) VALUES (?, ?, ?)");
+                    // **NUEVO: Incluir precio_compra al crear producto**
+                    $stmt = $db->prepare("INSERT INTO productos (proveedor, descripcion, precio_compra, precio_venta) VALUES (?, ?, ?, ?)");
                     $stmt->execute([
                         $_POST['proveedor'],
                         $_POST['descripcion'],
+                        $_POST['precio_compra'] ?? 0,
                         $_POST['precio_venta']
                     ]);
                     $mensaje = "Producto creado exitosamente.";
@@ -29,13 +31,38 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
 
             case 'editar':
                 try {
-                    $stmt = $db->prepare("UPDATE productos SET proveedor = ?, descripcion = ?, precio_venta = ? WHERE id = ?");
+                    // **NUEVO: Incluir precio_compra al editar producto**
+                    $producto_id = $_POST['id'];
+                    $precio_compra_nuevo = $_POST['precio_compra'];
+                    
+                    // Obtener precio anterior
+                    $stmt_anterior = $db->prepare("SELECT precio_compra FROM productos WHERE id = ?");
+                    $stmt_anterior->execute([$producto_id]);
+                    $producto_anterior = $stmt_anterior->fetch();
+                    $precio_compra_anterior = $producto_anterior['precio_compra'];
+                    
+                    // Actualizar producto
+                    $stmt = $db->prepare("UPDATE productos SET proveedor = ?, descripcion = ?, precio_compra = ?, precio_venta = ? WHERE id = ?");
                     $stmt->execute([
                         $_POST['proveedor'],
                         $_POST['descripcion'],
+                        $precio_compra_nuevo,
                         $_POST['precio_venta'],
-                        $_POST['id']
+                        $producto_id
                     ]);
+                    
+                    // **NUEVO: Registrar cambio de precio de compra si hubo modificación**
+                    if ($precio_compra_anterior != $precio_compra_nuevo) {
+                        $stmt_historial = $db->prepare("INSERT INTO historial_precios_compra (producto_id, precio_compra_anterior, precio_compra_nuevo, motivo, usuario) VALUES (?, ?, ?, ?, ?)");
+                        $stmt_historial->execute([
+                            $producto_id,
+                            $precio_compra_anterior,
+                            $precio_compra_nuevo,
+                            'Edición manual desde gestión de productos',
+                            'Usuario'
+                        ]);
+                    }
+                    
                     $mensaje = "Producto actualizado exitosamente.";
                     $tipo_mensaje = "success";
                 } catch (Exception $e) {
@@ -101,8 +128,20 @@ $stmt_count->execute($params);
 $total_productos = $stmt_count->fetch()['total'];
 $total_pages = ceil($total_productos / $limit);
 
-// Obtener productos
-$query = "SELECT * FROM productos $where_clause ORDER BY fecha_creacion DESC LIMIT $limit OFFSET $offset";
+// **MODIFICADO: Obtener productos con precio_compra y margen_ganancia**
+$query = "SELECT 
+    id, 
+    proveedor, 
+    descripcion, 
+    precio_compra,
+    precio_venta, 
+    existencia,
+    margen_ganancia,
+    fecha_creacion 
+FROM productos 
+$where_clause 
+ORDER BY fecha_creacion DESC 
+LIMIT $limit OFFSET $offset";
 $stmt = $db->prepare($query);
 $stmt->execute($params);
 $productos = $stmt->fetchAll();
@@ -270,6 +309,27 @@ $proveedores = $stmt_proveedores->fetchAll();
             margin-bottom: 1rem;
         }
         
+        /* **NUEVO: Estilos para badges de margen** */
+        .margen-badge {
+            font-size: 0.85rem;
+            padding: 0.35rem 0.6rem;
+        }
+        
+        .margen-alto {
+            background-color: #28a745;
+            color: white;
+        }
+        
+        .margen-medio {
+            background-color: #ffc107;
+            color: #000;
+        }
+        
+        .margen-bajo {
+            background-color: #dc3545;
+            color: white;
+        }
+        
         /* Responsive Design */
         
         /* Tablets y pantallas medianas */
@@ -352,8 +412,8 @@ $proveedores = $stmt_proveedores->fetchAll();
                 display: none;
             }
             
-            .table th:nth-child(6),
-            .table td:nth-child(6) {
+            .table th:nth-child(7),
+            .table td:nth-child(7) {
                 display: none;
             }
             
@@ -482,19 +542,6 @@ $proveedores = $stmt_proveedores->fetchAll();
             animation: slideIn 0.3s ease-out;
         }
         
-        /* Mejorar la experiencia de los formularios */
-        .form-control:focus,
-        .form-select:focus {
-            border-color: #86b7fe;
-            box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
-        }
-        
-        /* Mejorar los badges de existencia */
-        .badge {
-            font-weight: 500;
-            padding: 0.375em 0.75em;
-        }
-        
         /* Hover effects para botones de acción */
         .btn-outline-primary:hover,
         .btn-outline-danger:hover {
@@ -521,34 +568,6 @@ $proveedores = $stmt_proveedores->fetchAll();
             .form-control,
             .form-select {
                 font-size: 16px; /* Previene zoom en iOS */
-            }
-        }
-        
-        /* Indicador de scroll en tablas */
-        .table-responsive {
-            position: relative;
-        }
-        
-        .table-responsive::after {
-            content: '';
-            position: absolute;
-            top: 0;
-            right: 0;
-            bottom: 0;
-            width: 20px;
-            background: linear-gradient(to left, rgba(248,249,250,1) 0%, rgba(248,249,250,0) 100%);
-            pointer-events: none;
-            opacity: 0;
-            transition: opacity 0.3s ease;
-        }
-        
-        .table-responsive:hover::after {
-            opacity: 1;
-        }
-        
-        @media (max-width: 767.98px) {
-            .table-responsive::after {
-                display: none;
             }
         }
     </style>
@@ -618,7 +637,6 @@ $proveedores = $stmt_proveedores->fetchAll();
                 </ul>
             </div>
         </nav>
-        
         <!-- Contenido principal -->
         <main class="main-content">
             <div class="content-wrapper">
@@ -697,7 +715,9 @@ $proveedores = $stmt_proveedores->fetchAll();
                                             <th>ID</th>
                                             <th>Proveedor</th>
                                             <th>Descripción</th>
+                                            <th class="text-end">Precio Compra</th>
                                             <th class="text-end">Precio Venta</th>
+                                            <th class="text-center">Margen %</th>
                                             <th class="text-center">Existencia</th>
                                             <th class="d-none d-md-table-cell">Fecha Creación</th>
                                             <th class="table-actions text-center">Acciones</th>
@@ -705,6 +725,16 @@ $proveedores = $stmt_proveedores->fetchAll();
                                     </thead>
                                     <tbody>
                                         <?php foreach ($productos as $producto): ?>
+                                            <?php
+                                            // **NUEVO: Determinar clase de margen**
+                                            $margen = $producto['margen_ganancia'];
+                                            $margen_class = 'margen-bajo';
+                                            if ($margen >= 30) {
+                                                $margen_class = 'margen-alto';
+                                            } elseif ($margen >= 15) {
+                                                $margen_class = 'margen-medio';
+                                            }
+                                            ?>
                                             <tr>
                                                 <td class="fw-medium"><?php echo $producto['id']; ?></td>
                                                 <td>
@@ -717,8 +747,18 @@ $proveedores = $stmt_proveedores->fetchAll();
                                                         <?php echo htmlspecialchars($producto['descripcion']); ?>
                                                     </span>
                                                 </td>
+                                                <!-- **NUEVO: Mostrar precio de compra** -->
+                                                <td class="text-end text-info fw-medium">
+                                                    $<?php echo number_format($producto['precio_compra'], 2); ?>
+                                                </td>
                                                 <td class="text-end fw-medium">
                                                     $<?php echo number_format($producto['precio_venta'], 2); ?>
+                                                </td>
+                                                <!-- **NUEVO: Mostrar margen de ganancia** -->
+                                                <td class="text-center">
+                                                    <span class="badge margen-badge <?php echo $margen_class; ?>">
+                                                        <?php echo number_format($margen, 1); ?>%
+                                                    </span>
                                                 </td>
                                                 <td class="text-center">
                                                     <span class="badge fs-6 <?php echo $producto['existencia'] == 0 ? 'bg-danger' : ($producto['existencia'] < 10 ? 'bg-warning text-dark' : 'bg-success'); ?>">
@@ -808,24 +848,48 @@ $proveedores = $stmt_proveedores->fetchAll();
                         <input type="hidden" name="id" id="producto_id">
                         
                         <div class="mb-3">
-                            <label for="proveedor" class="form-label">Proveedor <span class="text-danger">*</span></label>
+                            <label for="proveedor_modal" class="form-label">Proveedor <span class="text-danger">*</span></label>
                             <input type="text" class="form-control" id="proveedor_modal" name="proveedor" required 
                                    maxlength="255" placeholder="Nombre del proveedor">
                         </div>
                         
                         <div class="mb-3">
-                            <label for="descripcion" class="form-label">Descripción <span class="text-danger">*</span></label>
+                            <label for="descripcion_modal" class="form-label">Descripción <span class="text-danger">*</span></label>
                             <textarea class="form-control" id="descripcion_modal" name="descripcion" required 
                                       rows="3" placeholder="Descripción del producto"></textarea>
                         </div>
                         
+                        <!-- **NUEVO: Campo para precio de compra** -->
                         <div class="mb-3">
-                            <label for="precio_venta" class="form-label">Precio de Venta <span class="text-danger">*</span></label>
+                            <label for="precio_compra_modal" class="form-label">
+                                <i class="bi bi-cart-dash text-info"></i> Precio de Compra
+                            </label>
+                            <div class="input-group">
+                                <span class="input-group-text">$</span>
+                                <input type="number" class="form-control" id="precio_compra_modal" name="precio_compra" 
+                                       min="0" step="0.01" placeholder="0.00" value="0">
+                            </div>
+                            <small class="text-muted">
+                                <i class="bi bi-info-circle"></i> Precio al que compra este producto. Es editable y se actualiza automáticamente con cada ingreso.
+                            </small>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="precio_venta_modal" class="form-label">
+                                <i class="bi bi-cash-coin text-success"></i> Precio de Venta <span class="text-danger">*</span>
+                            </label>
                             <div class="input-group">
                                 <span class="input-group-text">$</span>
                                 <input type="number" class="form-control" id="precio_venta_modal" name="precio_venta" 
                                        required min="0" step="0.01" placeholder="0.00">
                             </div>
+                        </div>
+                        
+                        <!-- **NUEVO: Mostrar margen de ganancia calculado** -->
+                        <div id="margen_info" class="alert alert-info" style="display: none;">
+                            <strong><i class="bi bi-graph-up"></i> Margen de Ganancia:</strong>
+                            <span id="margen_porcentaje" class="fs-5 fw-bold"></span>
+                            <span id="margen_texto" class="ms-2"></span>
                         </div>
                     </div>
                     <div class="modal-footer">
@@ -878,7 +942,6 @@ $proveedores = $stmt_proveedores->fetchAll();
             </div>
         </div>
     </div>
-
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         // Sistema de sidebar responsivo (reutilizado)
@@ -980,6 +1043,48 @@ $proveedores = $stmt_proveedores->fetchAll();
             }
         }
 
+        // **NUEVO: Función para calcular y mostrar margen de ganancia**
+        function calcularMargenGanancia() {
+            const precioCompra = parseFloat(document.getElementById('precio_compra_modal').value) || 0;
+            const precioVenta = parseFloat(document.getElementById('precio_venta_modal').value) || 0;
+            
+            const margenInfo = document.getElementById('margen_info');
+            const margenPorcentaje = document.getElementById('margen_porcentaje');
+            const margenTexto = document.getElementById('margen_texto');
+            
+            if (precioCompra > 0 && precioVenta > 0) {
+                const margen = ((precioVenta - precioCompra) / precioCompra) * 100;
+                const ganancia = precioVenta - precioCompra;
+                
+                margenPorcentaje.textContent = margen.toFixed(2) + '%';
+                margenTexto.textContent = `(Ganancia: $${ganancia.toFixed(2)} por unidad)`;
+                
+                // Cambiar color según el margen
+                margenInfo.classList.remove('alert-info', 'alert-success', 'alert-warning', 'alert-danger');
+                if (margen >= 30) {
+                    margenInfo.classList.add('alert-success');
+                    margenTexto.innerHTML += ' <span class="badge bg-success">Excelente</span>';
+                } else if (margen >= 15) {
+                    margenInfo.classList.add('alert-warning');
+                    margenTexto.innerHTML += ' <span class="badge bg-warning text-dark">Aceptable</span>';
+                } else if (margen > 0) {
+                    margenInfo.classList.add('alert-danger');
+                    margenTexto.innerHTML += ' <span class="badge bg-danger">Bajo</span>';
+                } else {
+                    margenInfo.classList.add('alert-danger');
+                    margenTexto.innerHTML = '<span class="badge bg-danger">¡Pérdida!</span> El precio de venta es menor o igual al de compra';
+                }
+                
+                margenInfo.style.display = 'block';
+            } else {
+                margenInfo.style.display = 'none';
+            }
+        }
+
+        // **NUEVO: Evento para calcular margen en tiempo real**
+        document.getElementById('precio_compra_modal').addEventListener('input', calcularMargenGanancia);
+        document.getElementById('precio_venta_modal').addEventListener('input', calcularMargenGanancia);
+
         // Funciones específicas para gestión de productos
         function editarProducto(producto) {
             document.getElementById('modalProductoLabel').innerHTML = '<i class="bi bi-pencil-square"></i> Editar Producto';
@@ -987,8 +1092,14 @@ $proveedores = $stmt_proveedores->fetchAll();
             document.getElementById('producto_id').value = producto.id;
             document.getElementById('proveedor_modal').value = producto.proveedor;
             document.getElementById('descripcion_modal').value = producto.descripcion;
+            
+            // **NUEVO: Cargar precio de compra**
+            document.getElementById('precio_compra_modal').value = producto.precio_compra;
             document.getElementById('precio_venta_modal').value = producto.precio_venta;
             document.getElementById('btnTexto').textContent = 'Actualizar Producto';
+            
+            // Calcular y mostrar margen actual
+            calcularMargenGanancia();
             
             const modal = new bootstrap.Modal(document.getElementById('modalProducto'));
             modal.show();
@@ -1010,6 +1121,10 @@ $proveedores = $stmt_proveedores->fetchAll();
             document.getElementById('producto_id').value = '';
             document.getElementById('btnTexto').textContent = 'Guardar Producto';
             
+            // **NUEVO: Ocultar margen y resetear precio de compra**
+            document.getElementById('margen_info').style.display = 'none';
+            document.getElementById('precio_compra_modal').value = '0';
+            
             // Limpiar estilos de validación
             const inputs = this.querySelectorAll('.form-control, .form-select');
             inputs.forEach(input => {
@@ -1017,13 +1132,14 @@ $proveedores = $stmt_proveedores->fetchAll();
             });
         });
 
-        // Validación del formulario
+        // Validación del formulario mejorada
         document.getElementById('formProducto').addEventListener('submit', function(e) {
             e.preventDefault();
             
             const proveedor = document.getElementById('proveedor_modal').value.trim();
             const descripcion = document.getElementById('descripcion_modal').value.trim();
-            const precio = parseFloat(document.getElementById('precio_venta_modal').value);
+            const precioCompra = parseFloat(document.getElementById('precio_compra_modal').value);
+            const precioVenta = parseFloat(document.getElementById('precio_venta_modal').value);
             
             let isValid = true;
             
@@ -1047,14 +1163,41 @@ $proveedores = $stmt_proveedores->fetchAll();
                 descripcionInput.classList.add('is-valid');
             }
             
-            // Validar precio
-            const precioInput = document.getElementById('precio_venta_modal');
-            if (!precio || precio <= 0) {
-                precioInput.classList.add('is-invalid');
+            // **NUEVO: Validar precio de compra**
+            const precioCompraInput = document.getElementById('precio_compra_modal');
+            if (isNaN(precioCompra) || precioCompra < 0) {
+                precioCompraInput.classList.add('is-invalid');
                 isValid = false;
             } else {
-                precioInput.classList.remove('is-invalid');
-                precioInput.classList.add('is-valid');
+                precioCompraInput.classList.remove('is-invalid');
+                precioCompraInput.classList.add('is-valid');
+            }
+            
+            // Validar precio de venta
+            const precioVentaInput = document.getElementById('precio_venta_modal');
+            if (!precioVenta || precioVenta <= 0) {
+                precioVentaInput.classList.add('is-invalid');
+                isValid = false;
+            } else {
+                precioVentaInput.classList.remove('is-invalid');
+                precioVentaInput.classList.add('is-valid');
+            }
+            
+            // **NUEVO: Advertir si el precio de venta es menor al de compra**
+            if (precioCompra > 0 && precioVenta > 0 && precioVenta < precioCompra) {
+                if (!confirm('⚠️ ADVERTENCIA: El precio de venta ($' + precioVenta.toFixed(2) + ') es MENOR que el precio de compra ($' + precioCompra.toFixed(2) + ').\n\n¿Está seguro que desea continuar? Esto generará una PÉRDIDA en cada venta.')) {
+                    return false;
+                }
+            }
+            
+            // **NUEVO: Advertir si el margen es muy bajo**
+            if (precioCompra > 0 && precioVenta > 0) {
+                const margen = ((precioVenta - precioCompra) / precioCompra) * 100;
+                if (margen < 10 && margen > 0) {
+                    if (!confirm('⚠️ ADVERTENCIA: El margen de ganancia es muy bajo (' + margen.toFixed(2) + '%).\n\n¿Está seguro que desea continuar?')) {
+                        return false;
+                    }
+                }
             }
             
             if (!isValid) {
@@ -1077,7 +1220,7 @@ $proveedores = $stmt_proveedores->fetchAll();
             // Si todo está válido, enviar el formulario
             const btnGuardar = document.getElementById('btnGuardar');
             const originalText = btnGuardar.innerHTML;
-            btnGuardar.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span> Guardando...';
+            btnGuardar.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status"></span>Guardando...';
             btnGuardar.disabled = true;
             
             // Enviar formulario
@@ -1224,6 +1367,59 @@ $proveedores = $stmt_proveedores->fetchAll();
             });
         }
 
+        // **NUEVO: Función para exportar productos con precios**
+        function exportarProductos() {
+            const tabla = document.querySelector('table');
+            if (!tabla) return;
+            
+            let csv = 'ID,Proveedor,Descripción,Precio Compra,Precio Venta,Margen %,Existencia\n';
+            
+            const filas = tabla.querySelectorAll('tbody tr');
+            filas.forEach(fila => {
+                const celdas = fila.querySelectorAll('td');
+                const datos = [];
+                
+                // ID
+                datos.push('"' + celdas[0].textContent.trim() + '"');
+                // Proveedor
+                datos.push('"' + celdas[1].textContent.trim().replace(/"/g, '""') + '"');
+                // Descripción
+                datos.push('"' + celdas[2].textContent.trim().replace(/"/g, '""') + '"');
+                // Precio Compra
+                datos.push(celdas[3].textContent.trim().replace('$', ''));
+                // Precio Venta
+                datos.push(celdas[4].textContent.trim().replace('$', ''));
+                // Margen
+                datos.push(celdas[5].textContent.trim().replace('%', ''));
+                // Existencia
+                datos.push(celdas[6].textContent.trim());
+                
+                csv += datos.join(',') + '\n';
+            });
+            
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            link.setAttribute('href', url);
+            link.setAttribute('download', 'productos_' + new Date().toISOString().split('T')[0] + '.csv');
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        // **NUEVO: Agregar botón de exportar**
+        document.addEventListener('DOMContentLoaded', function() {
+            const cardHeader = document.querySelector('.card-header h5');
+            if (cardHeader && document.querySelectorAll('tbody tr').length > 0) {
+                const btnExportar = document.createElement('button');
+                btnExportar.className = 'btn btn-sm btn-outline-success ms-2';
+                btnExportar.innerHTML = '<i class="bi bi-file-earmark-excel"></i> Exportar';
+                btnExportar.onclick = exportarProductos;
+                cardHeader.appendChild(btnExportar);
+            }
+        });
+
         // Inicialización principal
         document.addEventListener('DOMContentLoaded', function() {
             // Inicializar sidebar responsivo
@@ -1250,7 +1446,7 @@ $proveedores = $stmt_proveedores->fetchAll();
             const hasVisited = localStorage.getItem('productos_visited');
             if (!hasVisited && <?php echo count($productos); ?> === 0) {
                 setTimeout(() => {
-                    showToast('¡Bienvenido! Comience creando su primer producto.', 'info');
+                    showToast('¡Bienvenido! Comience creando su primer producto con precio de compra.', 'info');
                     localStorage.setItem('productos_visited', 'true');
                 }, 1000);
             }
@@ -1285,6 +1481,14 @@ $proveedores = $stmt_proveedores->fetchAll();
                 // Optimizaciones adicionales
             }, 100);
         }, { passive: true });
+
+        // Log de inicialización
+        console.log('✅ Sistema de Productos V2.0 - Cargado correctamente');
+        console.log('✅ Funcionalidades:');
+        console.log('   - Gestión de precios de compra');
+        console.log('   - Cálculo automático de márgenes');
+        console.log('   - Validación de rentabilidad');
+        console.log('   - Historial de cambios de precios');
     </script>
 </body>
 </html>

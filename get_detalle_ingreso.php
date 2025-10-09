@@ -27,17 +27,37 @@ try {
         exit;
     }
     
-    // Obtener detalles del ingreso
+    // **MODIFICADO: Incluir precio_compra y precio_venta actual del producto para comparar**
     $stmt_detalles = $db->prepare("SELECT 
         di.*,
         p.descripcion,
-        p.proveedor
+        p.proveedor,
+        p.precio_compra as precio_compra_actual,
+        p.precio_venta,
+        p.margen_ganancia as margen_actual
     FROM detalle_ingresos di 
     INNER JOIN productos p ON di.producto_id = p.id 
     WHERE di.ingreso_id = ?
     ORDER BY p.descripcion");
     $stmt_detalles->execute([$ingreso_id]);
     $detalles = $stmt_detalles->fetchAll();
+    
+    // **NUEVO: Agregar información de si el precio cambió desde este ingreso**
+    foreach ($detalles as &$detalle) {
+        $precio_ingreso = floatval($detalle['precio_compra']);
+        $precio_actual = floatval($detalle['precio_compra_actual']);
+        
+        $detalle['precio_cambio'] = ($precio_ingreso != $precio_actual);
+        $detalle['precio_diferencia'] = $precio_actual - $precio_ingreso;
+        
+        // Calcular el margen que había en ese momento
+        if ($precio_ingreso > 0) {
+            $precio_venta = floatval($detalle['precio_venta']);
+            $detalle['margen_en_ingreso'] = (($precio_venta - $precio_ingreso) / $precio_ingreso) * 100;
+        } else {
+            $detalle['margen_en_ingreso'] = 0;
+        }
+    }
     
     echo json_encode([
         'success' => true,

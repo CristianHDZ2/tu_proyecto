@@ -13,7 +13,17 @@ try {
     
     $proveedor = $_GET['proveedor'];
     
-    $stmt = $db->prepare("SELECT id, descripcion, existencia, precio_venta FROM productos WHERE proveedor = ? ORDER BY descripcion");
+    // **MODIFICADO: Incluir precio_compra en la consulta**
+    $stmt = $db->prepare("SELECT 
+        id, 
+        descripcion, 
+        existencia, 
+        precio_compra,
+        precio_venta,
+        margen_ganancia
+    FROM productos 
+    WHERE proveedor = ? 
+    ORDER BY descripcion");
     $stmt->execute([$proveedor]);
     $productos = $stmt->fetchAll();
     
