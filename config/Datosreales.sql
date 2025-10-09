@@ -149,16 +149,18 @@ INSERT INTO productos (proveedor, descripcion, precio_venta) VALUES
 ('La Constancia', 'Del Valle Mandarina 2.5L pet (6 Pack)', 8.55);
 -- INSERTAR NUEVOS PRODUCTOS - PARTE 2
 INSERT INTO productos (proveedor, descripcion, precio_venta) VALUES
+('La Constancia', 'Energy Fury 500ml pet (12 Pack)', 11.25),
 ('La Constancia', 'Fanta Naranja 1.25L pet (12pack)', 13.50),
 ('La Constancia', 'Fanta Naranja 2.5L pet (6 Pack)', 11.55),
 ('La Constancia', 'Fanta Naranja Lata 354ml (12 Pack)', 7.22),
 ('La Constancia', 'Fanta Vidrio 354ml (24 Pack)', 10.25),
-('La Constancia', 'Gatorade Celeste 600ml (24 Pack)', 22.10),
-('La Constancia', 'Gatorade Limón 600ml (24 Pack)', 22.10),
-('La Constancia', 'Gatorade Naranja 600ml (24 Pack)', 22.10),
-('La Constancia', 'Gatorade Rojo 600ml (24 Pack)', 22.10),
-('La Constancia', 'Gatorade Uva 600ml (24 Pack)', 22.10),
+('Pepsi', 'Gatorade Celeste 600ml (24 Pack)', 22.10),
+('Pepsi', 'Gatorade Limón 600ml (24 Pack)', 22.10),
+('Pepsi', 'Gatorade Naranja 600ml (24 Pack)', 22.10),
+('Pepsi', 'Gatorade Rojo 600ml (24 Pack)', 22.10),
+('Pepsi', 'Gatorade Uva 600ml (24 Pack)', 22.10),
 ('Grupo AJE', 'Kola Real K.R 300ml (12 Pack)', 2.50),
+('Grupo AJE', 'Kola Real K.R Naranja 300ml (12 Pack)', 5.00),
 ('Pepsi', 'Néctar California de Durazno 330ml (24 Pack)', 10.00),
 ('Pepsi', 'Néctar California de Pera 330ml (24 Pack)', 10.00),
 ('Pepsi', 'Néctar California Sabores Surtidos 330ml (24 Pack)', 10.00),
@@ -184,6 +186,7 @@ INSERT INTO productos (proveedor, descripcion, precio_venta) VALUES
 ('Pepsi', 'Salutaris Agua Mineral 355ml (24 Pack)', 13.00),
 ('Pepsi', 'Salutaris de Limón 355ml (24 Pack)', 13.00),
 ('Pepsi', 'Salutaris Naranja 355ml (24 Pack)', 13.00),
+('Pepsi', 'Salutaris Toronja 355ml (24 Pack)', 13.00),
 ('Grupo AJE', 'Sporade Ice Apple 625ml (12 Pack)', 5.75),
 ('Grupo AJE', 'Sporade Blue Berry 360ml (12 Pack)', 3.80),
 ('Grupo AJE', 'Sporade Blue Berry 625ml (12 Pack)', 5.75),
@@ -233,3 +236,18 @@ SELECT id, proveedor, descripcion, precio_venta
 FROM productos 
 ORDER BY id 
 LIMIT 10;
+
+-- Verificar los productos nuevos agregados
+SELECT id, proveedor, descripcion, precio_venta 
+FROM productos 
+WHERE descripcion IN (
+    'Salutaris Toronja 355ml (24 Pack)',
+    'Energy Fury 500ml pet (12 Pack)',
+    'Kola Real K.R Naranja 300ml (12 Pack)'
+);
+
+-- Verificar que los productos Gatorade ahora están bajo Pepsi
+SELECT id, proveedor, descripcion, precio_venta 
+FROM productos 
+WHERE descripcion LIKE '%Gatorade%'
+ORDER BY descripcion;
