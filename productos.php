@@ -700,16 +700,22 @@ $proveedores = $stmt_proveedores->fetchAll();
 
                 <!-- Tabla de productos -->
                 <div class="card animate-in">
-                    <div class="card-header">
+                    <div class="card-header d-flex justify-content-between align-items-center flex-wrap">
                         <h5 class="card-title mb-0">
                             <i class="bi bi-list-ul"></i> 
                             Lista de Productos (<?php echo number_format($total_productos); ?> total)
                         </h5>
+                        <!-- **NUEVO: Botón de exportar a Excel mejorado** -->
+                        <button type="button" class="btn btn-success btn-sm mt-2 mt-md-0" onclick="exportarTodosProductosExcel()">
+                            <i class="bi bi-file-earmark-excel"></i> 
+                            <span class="d-none d-sm-inline">Exportar TODOS a Excel</span>
+                            <span class="d-sm-none">Excel</span>
+                        </button>
                     </div>
                     <div class="card-body">
                         <?php if (count($productos) > 0): ?>
                             <div class="table-responsive">
-                                <table class="table table-striped table-hover mb-0">
+                                <table class="table table-striped table-hover mb-0" id="tablaProductos">
                                     <thead class="table-dark">
                                         <tr>
                                             <th>ID</th>
@@ -831,7 +837,6 @@ $proveedores = $stmt_proveedores->fetchAll();
             </div>
         </main>
     </div>
-
     <!-- Modal para crear/editar producto -->
     <div class="modal fade" id="modalProducto" tabindex="-1" aria-labelledby="modalProductoLabel" aria-hidden="true">
         <div class="modal-dialog">
@@ -942,7 +947,10 @@ $proveedores = $stmt_proveedores->fetchAll();
             </div>
         </div>
     </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- **NUEVO: Importar SheetJS desde CDN** -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <script>
         // Sistema de sidebar responsivo (reutilizado)
         class ResponsiveSidebar {
@@ -1131,7 +1139,6 @@ $proveedores = $stmt_proveedores->fetchAll();
                 input.classList.remove('is-valid', 'is-invalid');
             });
         });
-
         // Validación del formulario mejorada
         document.getElementById('formProducto').addEventListener('submit', function(e) {
             e.preventDefault();
@@ -1227,38 +1234,297 @@ $proveedores = $stmt_proveedores->fetchAll();
             this.submit();
         });
 
-        // Mejorar la experiencia de búsqueda
-        function setupSearch() {
-            const searchInput = document.getElementById('search');
-            const proveedorSelect = document.getElementById('proveedor');
-            
-            let searchTimeout;
-            
-            // Búsqueda en tiempo real (opcional)
-            searchInput?.addEventListener('input', function() {
-                clearTimeout(searchTimeout);
-                searchTimeout = setTimeout(() => {
-                    // Aquí se podría implementar búsqueda AJAX
-                    // Por ahora mantenemos el comportamiento actual
-                }, 500);
-            });
-            
-            // Autocompletar proveedores
-            const proveedores = <?php echo json_encode(array_column($proveedores, 'proveedor')); ?>;
-            
-            searchInput?.addEventListener('input', function() {
-                const value = this.value.toLowerCase();
-                const suggestions = proveedores.filter(p => 
-                    p.toLowerCase().includes(value)
-                );
+        // **NUEVA FUNCIÓN MEJORADA: Exportar TODOS los productos a Excel con SheetJS**
+        async function exportarTodosProductosExcel() {
+            try {
+                // Mostrar indicador de carga
+                const btnExportar = event.target.closest('button');
+                const textoOriginal = btnExportar.innerHTML;
+                btnExportar.disabled = true;
+                btnExportar.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Exportando todos los productos...';
                 
-                // Aquí se podría mostrar sugerencias
-            });
+                // Obtener filtros actuales de la URL
+                const urlParams = new URLSearchParams(window.location.search);
+                const search = urlParams.get('search') || '';
+                const proveedor = urlParams.get('proveedor') || '';
+                
+                // Construir URL con filtros
+                let fetchUrl = 'exportar_productos_excel.php';
+                const params = [];
+                if (search) params.push(`search=${encodeURIComponent(search)}`);
+                if (proveedor) params.push(`proveedor=${encodeURIComponent(proveedor)}`);
+                if (params.length > 0) fetchUrl += '?' + params.join('&');
+                
+                // Hacer petición al servidor para obtener TODOS los productos
+                const response = await fetch(fetchUrl);
+                const data = await response.json();
+                
+                if (!data.success) {
+                    throw new Error(data.message || 'Error al obtener los productos');
+                }
+                
+                const productos = data.productos;
+                const estadisticas = data.estadisticas;
+                
+                if (productos.length === 0) {
+                    showToast('⚠️ No hay productos para exportar', 'warning');
+                    btnExportar.disabled = false;
+                    btnExportar.innerHTML = textoOriginal;
+                    return;
+                }
+                
+                // **CREAR HOJA 1: PRODUCTOS**
+                const datosProductos = [];
+                
+                // Agregar encabezados
+                datosProductos.push([
+                    'ID',
+                    'Proveedor',
+                    'Descripción',
+                    'Precio Compra',
+                    'Precio Venta',
+                    'Margen %',
+                    'Existencia',
+                    'Valor Compra Inventario',
+                    'Valor Venta Inventario',
+                    'Ganancia Potencial',
+                    'Fecha Creación'
+                ]);
+                
+                // Agregar filas de datos
+                productos.forEach(producto => {
+                    datosProductos.push([
+                        producto.id,
+                        producto.proveedor,
+                        producto.descripcion,
+                        parseFloat(producto.precio_compra),
+                        parseFloat(producto.precio_venta),
+                        parseFloat(producto.margen_ganancia),
+                        parseInt(producto.existencia),
+                        parseFloat(producto.valor_compra_inventario),
+                        parseFloat(producto.valor_venta_inventario),
+                        parseFloat(producto.valor_venta_inventario - producto.valor_compra_inventario),
+                        producto.fecha_creacion_formato
+                    ]);
+                });
+                
+                // Crear libro de trabajo
+                const wb = XLSX.utils.book_new();
+                
+                // Crear hoja de productos
+                const wsProductos = XLSX.utils.aoa_to_sheet(datosProductos);
+                
+                // **CONFIGURAR ANCHOS DE COLUMNA**
+                wsProductos['!cols'] = [
+                    { wch: 8 },   // ID
+                    { wch: 20 },  // Proveedor
+                    { wch: 50 },  // Descripción
+                    { wch: 15 },  // Precio Compra
+                    { wch: 15 },  // Precio Venta
+                    { wch: 12 },  // Margen %
+                    { wch: 12 },  // Existencia
+                    { wch: 20 },  // Valor Compra Inventario
+                    { wch: 20 },  // Valor Venta Inventario
+                    { wch: 20 },  // Ganancia Potencial
+                    { wch: 18 }   // Fecha Creación
+                ];
+                
+                // **APLICAR FORMATOS**
+                const rangoProductos = XLSX.utils.decode_range(wsProductos['!ref']);
+                for (let R = 1; R <= rangoProductos.e.r; R++) {
+                    // Precio Compra (columna D)
+                    const cellPrecioCompra = XLSX.utils.encode_cell({ r: R, c: 3 });
+                    if (wsProductos[cellPrecioCompra] && typeof wsProductos[cellPrecioCompra].v === 'number') {
+                        wsProductos[cellPrecioCompra].z = '$#,##0.00';
+                    }
+                    
+                    // Precio Venta (columna E)
+                    const cellPrecioVenta = XLSX.utils.encode_cell({ r: R, c: 4 });
+                    if (wsProductos[cellPrecioVenta] && typeof wsProductos[cellPrecioVenta].v === 'number') {
+                        wsProductos[cellPrecioVenta].z = '$#,##0.00';
+                    }
+                    
+                    // Margen % (columna F)
+                    const cellMargen = XLSX.utils.encode_cell({ r: R, c: 5 });
+                    if (wsProductos[cellMargen] && typeof wsProductos[cellMargen].v === 'number') {
+                        wsProductos[cellMargen].z = '0.0"%"';
+                    }
+                    
+                    // Valor Compra Inventario (columna H)
+                    const cellValorCompra = XLSX.utils.encode_cell({ r: R, c: 7 });
+                    if (wsProductos[cellValorCompra] && typeof wsProductos[cellValorCompra].v === 'number') {
+                        wsProductos[cellValorCompra].z = '$#,##0.00';
+                    }
+                    
+                    // Valor Venta Inventario (columna I)
+                    const cellValorVenta = XLSX.utils.encode_cell({ r: R, c: 8 });
+                    if (wsProductos[cellValorVenta] && typeof wsProductos[cellValorVenta].v === 'number') {
+                        wsProductos[cellValorVenta].z = '$#,##0.00';
+                    }
+                    
+                    // Ganancia Potencial (columna J)
+                    const cellGanancia = XLSX.utils.encode_cell({ r: R, c: 9 });
+                    if (wsProductos[cellGanancia] && typeof wsProductos[cellGanancia].v === 'number') {
+                        wsProductos[cellGanancia].z = '$#,##0.00';
+                    }
+                }
+                
+                // Agregar hoja al libro
+                XLSX.utils.book_append_sheet(wb, wsProductos, 'Productos');
+                
+                // **CREAR HOJA 2: RESUMEN GENERAL**
+                const datosResumen = [
+                    ['RESUMEN GENERAL DE PRODUCTOS'],
+                    [''],
+                    ['Fecha de Exportación:', new Date().toLocaleString('es-ES')],
+                    ['Total de Productos:', estadisticas.total_productos],
+                    ['Total Existencia:', estadisticas.total_existencia],
+                    ['Valor Total Compra:', estadisticas.valor_total_compra],
+                    ['Valor Total Venta:', estadisticas.valor_total_venta],
+                    ['Ganancia Potencial Total:', estadisticas.ganancia_potencial_total],
+                    ['']
+                ];
+                
+                // Agregar filtros aplicados si existen
+                if (data.filtros_aplicados.busqueda || data.filtros_aplicados.proveedor) {
+                    datosResumen.push(['FILTROS APLICADOS:']);
+                    if (data.filtros_aplicados.busqueda) {
+                        datosResumen.push(['Búsqueda:', data.filtros_aplicados.busqueda]);
+                    }
+                    if (data.filtros_aplicados.proveedor) {
+                        datosResumen.push(['Proveedor:', data.filtros_aplicados.proveedor]);
+                    }
+                    datosResumen.push(['']);
+                }
+                
+                // Crear hoja de resumen
+                const wsResumen = XLSX.utils.aoa_to_sheet(datosResumen);
+                
+                // Configurar anchos de columna
+                wsResumen['!cols'] = [
+                    { wch: 30 },
+                    { wch: 25 }
+                ];
+                
+                // Aplicar formato de moneda
+                const rangoResumen = XLSX.utils.decode_range(wsResumen['!ref']);
+                for (let R = 0; R <= rangoResumen.e.r; R++) {
+                    const cellValor = XLSX.utils.encode_cell({ r: R, c: 1 });
+                    if (wsResumen[cellValor] && typeof wsResumen[cellValor].v === 'number') {
+                        wsResumen[cellValor].z = '$#,##0.00';
+                    }
+                }
+                
+                // Agregar hoja de resumen al libro
+                XLSX.utils.book_append_sheet(wb, wsResumen, 'Resumen General');
+                
+                // **CREAR HOJA 3: ESTADÍSTICAS POR PROVEEDOR**
+                const datosProveedores = [
+                    ['ESTADÍSTICAS POR PROVEEDOR'],
+                    [''],
+                    ['Proveedor', 'Cantidad Productos', 'Stock Total', 'Valor Compra Total', 'Valor Venta Total', 'Ganancia Potencial', 'Margen Promedio %']
+                ];
+                
+                // Agregar datos por proveedor
+                for (const [proveedor, stats] of Object.entries(estadisticas.por_proveedor)) {
+                    datosProveedores.push([
+                        proveedor,
+                        stats.cantidad_productos,
+                        stats.stock_total,
+                        parseFloat(stats.valor_compra_total),
+                        parseFloat(stats.valor_venta_total),
+                        parseFloat(stats.ganancia_potencial),
+                        parseFloat(stats.margen_promedio)
+                    ]);
+                }
+                
+                // Agregar totales
+                datosProveedores.push(['']);
+                datosProveedores.push([
+                    'TOTALES',
+                    estadisticas.total_productos,
+                    estadisticas.total_existencia,
+                    estadisticas.valor_total_compra,
+                    estadisticas.valor_total_venta,
+                    estadisticas.ganancia_potencial_total,
+                    ''
+                ]);
+                
+                // Crear hoja de proveedores
+                const wsProveedores = XLSX.utils.aoa_to_sheet(datosProveedores);
+                
+                // Configurar anchos de columna
+                wsProveedores['!cols'] = [
+                    { wch: 25 },  // Proveedor
+                    { wch: 18 },  // Cantidad Productos
+                    { wch: 15 },  // Stock Total
+                    { wch: 20 },  // Valor Compra Total
+                    { wch: 20 },  // Valor Venta Total
+                    { wch: 20 },  // Ganancia Potencial
+                    { wch: 18 }   // Margen Promedio %
+                ];
+                
+                // Aplicar formatos
+                const rangoProveedores = XLSX.utils.decode_range(wsProveedores['!ref']);
+                for (let R = 3; R <= rangoProveedores.e.r; R++) {
+                    // Valor Compra Total (columna D)
+                    const cellCompra = XLSX.utils.encode_cell({ r: R, c: 3 });
+                    if (wsProveedores[cellCompra] && typeof wsProveedores[cellCompra].v === 'number') {
+                        wsProveedores[cellCompra].z = '$#,##0.00';
+                    }
+                    
+                    // Valor Venta Total (columna E)
+                    const cellVenta = XLSX.utils.encode_cell({ r: R, c: 4 });
+                    if (wsProveedores[cellVenta] && typeof wsProveedores[cellVenta].v === 'number') {
+                        wsProveedores[cellVenta].z = '$#,##0.00';
+                    }
+                    
+                    // Ganancia Potencial (columna F)
+                    const cellGanancia = XLSX.utils.encode_cell({ r: R, c: 5 });
+                    if (wsProveedores[cellGanancia] && typeof wsProveedores[cellGanancia].v === 'number') {
+                        wsProveedores[cellGanancia].z = '$#,##0.00';
+                    }
+                    
+                    // Margen Promedio % (columna G)
+                    const cellMargen = XLSX.utils.encode_cell({ r: R, c: 6 });
+                    if (wsProveedores[cellMargen] && typeof wsProveedores[cellMargen].v === 'number') {
+                        wsProveedores[cellMargen].z = '0.0"%"';
+                    }
+                }
+                
+                // Agregar hoja de proveedores al libro
+                XLSX.utils.book_append_sheet(wb, wsProveedores, 'Por Proveedor');
+                
+                // Generar nombre de archivo con fecha y cantidad
+                const fechaActual = new Date();
+                const nombreArchivo = `productos_completo_${fechaActual.getFullYear()}-${String(fechaActual.getMonth() + 1).padStart(2, '0')}-${String(fechaActual.getDate()).padStart(2, '0')}_${productos.length}_productos.xlsx`;
+                
+                // Descargar archivo
+                XLSX.writeFile(wb, nombreArchivo);
+                
+                // Restaurar botón
+                btnExportar.disabled = false;
+                btnExportar.innerHTML = textoOriginal;
+                
+                // Mostrar mensaje de éxito con detalles
+                showToast(`✅ Excel exportado: ${productos.length} productos en 3 hojas`, 'success');
+                
+            } catch (error) {
+                console.error('Error al exportar:', error);
+                
+                // Restaurar botón en caso de error
+                const btnExportar = event.target.closest('button');
+                if (btnExportar) {
+                    btnExportar.disabled = false;
+                    btnExportar.innerHTML = '<i class="bi bi-file-earmark-excel"></i> <span class="d-none d-sm-inline">Exportar TODOS a Excel</span>';
+                }
+                
+                showToast('❌ Error al exportar: ' + error.message, 'danger');
+            }
         }
 
         // Funciones de utilidad
         function showToast(message, type = 'success') {
-            // Crear toast notification
             const toastContainer = document.getElementById('toastContainer') || createToastContainer();
             
             const toast = document.createElement('div');
@@ -1276,10 +1542,9 @@ $proveedores = $stmt_proveedores->fetchAll();
             
             toastContainer.appendChild(toast);
             
-            const bsToast = new bootstrap.Toast(toast);
+            const bsToast = new bootstrap.Toast(toast, { delay: 5000 });
             bsToast.show();
             
-            // Limpiar después de que se oculte
             toast.addEventListener('hidden.bs.toast', () => {
                 toast.remove();
             });
@@ -1294,147 +1559,10 @@ $proveedores = $stmt_proveedores->fetchAll();
             return container;
         }
 
-        // Mejorar la experiencia de la tabla
-        function enhanceTable() {
-            const tableContainer = document.querySelector('.table-responsive');
-            if (!tableContainer) return;
-            
-            // Agregar indicador de scroll en móviles
-            if (window.innerWidth < 768) {
-                const table = tableContainer.querySelector('table');
-                const tableWidth = table.scrollWidth;
-                const containerWidth = tableContainer.clientWidth;
-                
-                if (tableWidth > containerWidth) {
-                    const indicator = document.createElement('div');
-                    indicator.className = 'text-center text-muted mt-2';
-                    indicator.innerHTML = '<small><i class="bi bi-arrow-left-right"></i> Desliza para ver más columnas</small>';
-                    tableContainer.appendChild(indicator);
-                    
-                    // Ocultar indicador después del primer scroll
-                    tableContainer.addEventListener('scroll', () => {
-                        indicator.style.opacity = '0.5';
-                    }, { once: true });
-                }
-            }
-            
-            // Mejorar el hover en filas de tabla
-            const rows = document.querySelectorAll('tbody tr');
-            rows.forEach(row => {
-                row.addEventListener('mouseenter', function() {
-                    this.style.backgroundColor = '#f8f9fa';
-                });
-                
-                row.addEventListener('mouseleave', function() {
-                    this.style.backgroundColor = '';
-                });
-            });
-        }
-
-        // Funciones de accesibilidad
-        function enhanceAccessibility() {
-            // Mejorar el foco en elementos interactivos
-            const buttons = document.querySelectorAll('button, .btn');
-            buttons.forEach(button => {
-                button.addEventListener('focus', function() {
-                    this.style.outline = '2px solid #007bff';
-                    this.style.outlineOffset = '2px';
-                });
-                
-                button.addEventListener('blur', function() {
-                    this.style.outline = '';
-                    this.style.outlineOffset = '';
-                });
-            });
-            
-            // Añadir teclas de acceso rápido
-            document.addEventListener('keydown', function(e) {
-                // Ctrl/Cmd + N para nuevo producto
-                if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
-                    e.preventDefault();
-                    const newBtn = document.querySelector('[data-bs-target="#modalProducto"]');
-                    if (newBtn) newBtn.click();
-                }
-                
-                // Escape para cerrar modales
-                if (e.key === 'Escape') {
-                    const openModals = document.querySelectorAll('.modal.show');
-                    openModals.forEach(modal => {
-                        const modalInstance = bootstrap.Modal.getInstance(modal);
-                        if (modalInstance) modalInstance.hide();
-                    });
-                }
-            });
-        }
-
-        // **NUEVO: Función para exportar productos con precios**
-        function exportarProductos() {
-            const tabla = document.querySelector('table');
-            if (!tabla) return;
-            
-            let csv = 'ID,Proveedor,Descripción,Precio Compra,Precio Venta,Margen %,Existencia\n';
-            
-            const filas = tabla.querySelectorAll('tbody tr');
-            filas.forEach(fila => {
-                const celdas = fila.querySelectorAll('td');
-                const datos = [];
-                
-                // ID
-                datos.push('"' + celdas[0].textContent.trim() + '"');
-                // Proveedor
-                datos.push('"' + celdas[1].textContent.trim().replace(/"/g, '""') + '"');
-                // Descripción
-                datos.push('"' + celdas[2].textContent.trim().replace(/"/g, '""') + '"');
-                // Precio Compra
-                datos.push(celdas[3].textContent.trim().replace('$', ''));
-                // Precio Venta
-                datos.push(celdas[4].textContent.trim().replace('$', ''));
-                // Margen
-                datos.push(celdas[5].textContent.trim().replace('%', ''));
-                // Existencia
-                datos.push(celdas[6].textContent.trim());
-                
-                csv += datos.join(',') + '\n';
-            });
-            
-            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-            const link = document.createElement('a');
-            const url = URL.createObjectURL(blob);
-            link.setAttribute('href', url);
-            link.setAttribute('download', 'productos_' + new Date().toISOString().split('T')[0] + '.csv');
-            link.style.visibility = 'hidden';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        }
-
-        // **NUEVO: Agregar botón de exportar**
-        document.addEventListener('DOMContentLoaded', function() {
-            const cardHeader = document.querySelector('.card-header h5');
-            if (cardHeader && document.querySelectorAll('tbody tr').length > 0) {
-                const btnExportar = document.createElement('button');
-                btnExportar.className = 'btn btn-sm btn-outline-success ms-2';
-                btnExportar.innerHTML = '<i class="bi bi-file-earmark-excel"></i> Exportar';
-                btnExportar.onclick = exportarProductos;
-                cardHeader.appendChild(btnExportar);
-            }
-        });
-
         // Inicialización principal
         document.addEventListener('DOMContentLoaded', function() {
             // Inicializar sidebar responsivo
             new ResponsiveSidebar();
-            
-            // Configurar funciones adicionales
-            setupSearch();
-            enhanceTable();
-            enhanceAccessibility();
-            
-            // Animar elementos al cargar
-            const animatedElements = document.querySelectorAll('.animate-in');
-            animatedElements.forEach((element, index) => {
-                element.style.animationDelay = `${index * 0.1}s`;
-            });
             
             // Configurar tooltips
             const tooltipTriggerList = [].slice.call(document.querySelectorAll('[title]'));
@@ -1442,13 +1570,35 @@ $proveedores = $stmt_proveedores->fetchAll();
                 return new bootstrap.Tooltip(tooltipTriggerEl);
             });
             
-            // Mostrar mensaje de bienvenida si es la primera vez
-            const hasVisited = localStorage.getItem('productos_visited');
-            if (!hasVisited && <?php echo count($productos); ?> === 0) {
-                setTimeout(() => {
-                    showToast('¡Bienvenido! Comience creando su primer producto con precio de compra.', 'info');
-                    localStorage.setItem('productos_visited', 'true');
-                }, 1000);
+            // Animar elementos al cargar
+            const animatedElements = document.querySelectorAll('.animate-in');
+            animatedElements.forEach((element, index) => {
+                element.style.animationDelay = `${index * 0.1}s`;
+            });
+        });
+
+        // Atajos de teclado
+        document.addEventListener('keydown', function(e) {
+            // Ctrl/Cmd + N para nuevo producto
+            if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+                e.preventDefault();
+                const newBtn = document.querySelector('[data-bs-target="#modalProducto"]');
+                if (newBtn) newBtn.click();
+            }
+            
+            // Ctrl/Cmd + E para exportar
+            if ((e.ctrlKey || e.metaKey) && e.key === 'e') {
+                e.preventDefault();
+                exportarTodosProductosExcel();
+            }
+            
+            // Escape para cerrar modales
+            if (e.key === 'Escape') {
+                const openModals = document.querySelectorAll('.modal.show');
+                openModals.forEach(modal => {
+                    const modalInstance = bootstrap.Modal.getInstance(modal);
+                    if (modalInstance) modalInstance.hide();
+                });
             }
         });
 
@@ -1461,34 +1611,14 @@ $proveedores = $stmt_proveedores->fetchAll();
             showToast('Sin conexión a internet', 'warning');
         });
 
-        // Prevenir pérdida de datos en formularios
-        window.addEventListener('beforeunload', function(e) {
-            const form = document.getElementById('formProducto');
-            const modal = document.getElementById('modalProducto');
-            
-            if (modal.classList.contains('show') && form.querySelector('.is-valid')) {
-                e.preventDefault();
-                e.returnValue = '¿Está seguro que desea salir? Los cambios no guardados se perderán.';
-            }
-        });
-
-        // Optimización de rendimiento
-        let scrollTimeout;
-        window.addEventListener('scroll', function() {
-            clearTimeout(scrollTimeout);
-            scrollTimeout = setTimeout(function() {
-                // Lazy loading de imágenes si las hubiera
-                // Optimizaciones adicionales
-            }, 100);
-        }, { passive: true });
-
         // Log de inicialización
-        console.log('✅ Sistema de Productos V2.0 - Cargado correctamente');
+        console.log('✅ Sistema de Productos V3.0 - Exportación Completa');
         console.log('✅ Funcionalidades:');
-        console.log('   - Gestión de precios de compra');
-        console.log('   - Cálculo automático de márgenes');
-        console.log('   - Validación de rentabilidad');
-        console.log('   - Historial de cambios de precios');
+        console.log('   - Exporta TODOS los productos (sin límite de paginación)');
+        console.log('   - 3 hojas: Productos, Resumen General, Por Proveedor');
+        console.log('   - Formato profesional con moneda y porcentajes');
+        console.log('   - Respeta filtros de búsqueda y proveedor');
+        console.log('   - Estadísticas completas por proveedor');
     </script>
 </body>
 </html>
